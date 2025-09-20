@@ -1,0 +1,6 @@
+{
+  "moduleToggles": {
+    "ApplicationSecurity/IIS": true,
+    "ApplicationSecurity/DNS": true
+  }
+}

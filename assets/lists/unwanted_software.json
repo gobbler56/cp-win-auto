@@ -1,0 +1,43 @@
+{
+  "products": [
+    {
+      "name": "Wireshark",
+      "exe": "Wireshark.exe",
+      "services": []
+    },
+    {
+      "name": "AnyDesk",
+      "exe": "AnyDesk.exe",
+      "services": [
+        "AnyDesk"
+      ]
+    },
+    {
+      "name": "TeamViewer",
+      "exe": "TeamViewer.exe",
+      "services": [
+        "TeamViewer"
+      ]
+    },
+    {
+      "name": "Cain",
+      "exe": "Cain.exe",
+      "services": []
+    },
+    {
+      "name": "John the Ripper",
+      "exe": "john.exe",
+      "services": []
+    },
+    {
+      "name": "Nmap",
+      "exe": "nmap.exe",
+      "services": []
+    },
+    {
+      "name": "uTorrent",
+      "exe": "uTorrent.exe",
+      "services": []
+    }
+  ]
+}

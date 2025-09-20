@@ -1,0 +1,16 @@
+{
+  "order": [
+    "UserAuditing",
+    "LocalPolicy",
+    "ApplicationSecurity",
+    "AccountPolicy",
+    "Defensive",
+    "ServiceAuditing",
+    "OSUpdates",
+    "AppUpdates",
+    "ProhibitedFiles",
+    "UnwantedSoftware",
+    "MalwarePersistence",
+    "UncategorizedOS"
+  ]
+}

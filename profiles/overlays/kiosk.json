@@ -1,0 +1,6 @@
+{
+  "moduleToggles": {
+    "ApplicationSecurity/RDP": false,
+    "ApplicationSecurity/SMB": false
+  }
+}

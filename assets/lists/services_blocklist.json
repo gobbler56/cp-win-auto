@@ -1,0 +1,28 @@
+{
+  "block": [
+    "TlntSvr",
+    "RemoteRegistry",
+    "SSDPSRV",
+    "upnphost",
+    "SNMP",
+    "SNMPTRAP",
+    "LPDSVC",
+    "Fax",
+    "XblGameSave",
+    "XboxGipSvc",
+    "XblAuthManager"
+  ],
+  "roleExceptions": {
+    "IIS": [
+      "W3SVC",
+      "WAS",
+      "IISADMIN"
+    ],
+    "DNS": [
+      "DNS"
+    ],
+    "Print": [
+      "Spooler"
+    ]
+  }
+}

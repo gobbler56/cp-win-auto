@@ -1,0 +1,13 @@
+# PowerShell
+*.psd1
+*.psm1
+*.ps1
+!Run.ps1
+# VS Code
+.vscode/
+.history/
+# OS
+Thumbs.db
+.DS_Store
+# Python cache if any
+__pycache__/

@@ -1,0 +1,8 @@
+{
+  "name": "UserAuditing",
+  "category": "UserAuditing",
+  "priority": 10,
+  "appliesTo": { "os": ["win11","server2019","server2022"], "role": ["member","dc"] },
+  "dependsOn": [],
+  "parallelizable": false
+}

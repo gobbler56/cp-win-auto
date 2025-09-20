@@ -1,0 +1,36 @@
+{
+  "categoryOrder": [
+    "UserAuditing",
+    "LocalPolicy",
+    "ApplicationSecurity",
+    "AccountPolicy",
+    "Defensive",
+    "ServiceAuditing",
+    "OSUpdates",
+    "AppUpdates",
+    "ProhibitedFiles",
+    "UnwantedSoftware",
+    "MalwarePersistence",
+    "UncategorizedOS"
+  ],
+  "moduleToggles": {
+    "ApplicationSecurity/Browsers": true,
+    "ApplicationSecurity/RDP": true,
+    "ApplicationSecurity/SMB": true,
+    "ApplicationSecurity/IIS": true,
+    "ApplicationSecurity/DNS": true,
+    "ApplicationSecurity/PHP": true,
+    "ApplicationSecurity/MySQL": true,
+    "ApplicationSecurity/FileZilla": true
+  },
+  "args": {
+    "MinPasswordLength": 12,
+    "PasswordHistory": 24,
+    "LockoutThreshold": 5,
+    "BrowserPolicyTarget": "AllUsers",
+    "UpdateAutoReboot": false,
+    "ScanExclusions": [
+      "C:\\Windows\\WinSxS"
+    ]
+  }
+}

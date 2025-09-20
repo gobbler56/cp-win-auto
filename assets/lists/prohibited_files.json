@@ -1,0 +1,42 @@
+{
+  "extensions": [
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".zip",
+    ".7z",
+    ".rar",
+    ".iso",
+    ".torrent",
+    ".apk"
+  ],
+  "namePatterns": [
+    "password",
+    "phpinfo",
+    "backdoor",
+    "id_rsa",
+    "shadow",
+    "sam",
+    "ntds",
+    "shodan"
+  ],
+  "paths": [
+    "C:\\Users\\*\\Downloads",
+    "C:\\Users\\*\\Desktop",
+    "C:\\Users\\*\\Documents",
+    "C:\\Users\\Public",
+    "C:\\ProgramData",
+    "C:\\inetpub\\wwwroot",
+    "C:\\xampp",
+    "C:\\Apache24\\htdocs",
+    "%TEMP%",
+    "C:\\Windows\\Temp",
+    "C:\\*",
+    "D:\\*",
+    "E:\\*"
+  ],
+  "regex": [
+    "(?i)credentials?.*\\.txt",
+    "(?i)ntds.*dump"
+  ]
+}

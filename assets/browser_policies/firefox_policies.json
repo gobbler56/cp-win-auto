@@ -1,0 +1,21 @@
+{
+  "policies": {
+    "BlockAboutAddons": true,
+    "DisableFirefoxStudies": true,
+    "DisableTelemetry": true,
+    "DisablePocket": true,
+    "DisableFormHistory": true,
+    "DisableFeedbackCommands": true,
+    "DisableFirefoxScreenshots": true,
+    "EnableTrackingProtection": {
+      "Value": true,
+      "Locked": true
+    },
+    "HttpsOnlyMode": {
+      "Enable": true
+    },
+    "PopupBlocking": {
+      "Default": true
+    }
+  }
+}
