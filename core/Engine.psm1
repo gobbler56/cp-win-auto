@@ -1,10 +1,9 @@
 ﻿Set-StrictMode -Version Latest
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Import-Module -Force (Join-Path $here 'Utils.psm1')
-Import-Module -Force (Join-Path $here 'Contracts.psm1')
-# Parsing is optional; modules can still run if README parse fails
-Import-Module -Force (Join-Path $here 'Parsing.psm1') -ErrorAction SilentlyContinue
+Import-Module -Force -DisableNameChecking (Join-Path $here 'Utils.psm1')
+Import-Module -Force -DisableNameChecking (Join-Path $here 'Contracts.psm1')
+Import-Module -Force -DisableNameChecking (Join-Path $here 'Parsing.psm1') -ErrorAction SilentlyContinue  # optional
 
 if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
   function Write-Info([string]$m){Write-Host "[*] $m" -ForegroundColor Cyan}
@@ -45,7 +44,7 @@ function Build-Context {
   }
 }
 
-# discovery supports BOTH: direct (NN_Category\*.psm1) and nested (NN_Category\Module\*.psm1)
+# Discover both direct (NN_Category\*.psm1) and nested (NN_Category\Module\*.psm1)
 function Get-Modules {
   param([Parameter(Mandatory)][string]$Root)
   $modsRoot = Join-Path $Root 'modules'
@@ -55,9 +54,11 @@ function Get-Modules {
     $folderPriority = 9999
     if ($catDir.Name -match '^(\d{2})_') { $folderPriority = [int]$Matches[1] * 100 }
 
-    # direct
+    $catMeta = $null
     $catMetaPath = Join-Path $catDir.FullName 'module.json'
-    $catMeta = $null; if (Test-Path $catMetaPath) { try { $catMeta = Get-Content -LiteralPath $catMetaPath -Raw | ConvertFrom-Json } catch {} }
+    if (Test-Path $catMetaPath) { try { $catMeta = Get-Content -LiteralPath $catMetaPath -Raw | ConvertFrom-Json } catch {} }
+
+    # direct
     foreach ($psm1 in (Get-ChildItem -Path $catDir.FullName -Filter *.psm1 -File -EA SilentlyContinue)) {
       $peerJson = Join-Path $catDir.FullName ($psm1.BaseName + '.json')
       $meta = $catMeta; if (Test-Path $peerJson) { try { $meta = Get-Content -LiteralPath $peerJson -Raw | ConvertFrom-Json } catch {} }
@@ -80,10 +81,8 @@ function Get-Modules {
   $out | Sort-Object Priority, Category, Name
 }
 
-# filter utilities
 function Select-ModulesByName {
   param([object[]]$Modules, [string[]]$Include, [string[]]$Exclude)
-
   if ($Include -and $Include.Count -gt 0) {
     $wanted = @()
     foreach ($pat in $Include) {
@@ -101,7 +100,7 @@ function Select-ModulesByName {
   $Modules
 }
 
-function Start-Engine {
+function Start-CpEngine {
   [CmdletBinding()]
   param(
     [ValidateSet('Apply','Verify')][string]$Mode = 'Apply',
@@ -121,7 +120,6 @@ function Start-Engine {
   $mods = Get-Modules  -Root $Root
   if (-not $mods -or $mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
 
-  # Interactive selection
   if ($Interactive) {
     Write-Host ""
     Write-Host "Select modules to run (comma-separated indexes or names; 'all' for everything):" -ForegroundColor Cyan
@@ -151,7 +149,7 @@ function Start-Engine {
 
   foreach ($m in $mods) {
     try {
-      Import-Module -Force -Name $m.Path
+      Import-Module -Force -DisableNameChecking -Name $m.Path
       $fnApply  = Get-Command -Name 'Invoke-Apply' -EA SilentlyContinue
       $fnVerify = Get-Command -Name 'Invoke-Verify' -EA SilentlyContinue
       $fnReady  = Get-Command -Name 'Test-Ready'    -EA SilentlyContinue
@@ -176,4 +174,4 @@ function Start-Engine {
   Write-Ok "All selected modules done"
 }
 
-Export-ModuleMember -Function Start-Engine, Get-OSProfile
+Export-ModuleMember -Function Start-CpEngine, Get-OSProfile

@@ -15,9 +15,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Import-Module -Force -Name (Join-Path $Root 'core/Utils.psm1')
-Import-Module -Force -Name (Join-Path $Root 'core/Contracts.psm1')
-Import-Module -Force -Name (Join-Path $Root 'core/Engine.psm1')
+Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Utils.psm1')
+Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Contracts.psm1')
+Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Engine.psm1')
 
 $params = @{
   Mode           = $Mode
@@ -30,4 +30,5 @@ $params = @{
   ExcludeModules = $ExcludeModules
 }
 
-Start-Engine @params
+# Call the module-qualified function to avoid any name collision with other modules on the box
+& 'Engine\Start-CpEngine' @params
