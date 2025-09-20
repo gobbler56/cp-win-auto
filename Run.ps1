@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Utils.psm1')
 Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Contracts.psm1')
-Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/Engine.psm1')
+Import-Module -Force -DisableNameChecking -Name (Join-Path $Root 'core/CpCore.psm1')
 
 $params = @{
   Mode           = $Mode
@@ -30,5 +30,4 @@ $params = @{
   ExcludeModules = $ExcludeModules
 }
 
-# Call the module-qualified function to avoid any name collision with other modules on the box
-& 'Engine\Start-CpEngine' @params
+Invoke-CpAutoCore @params
