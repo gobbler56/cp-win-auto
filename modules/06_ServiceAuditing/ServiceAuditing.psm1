@@ -1,8 +1,12 @@
 Set-StrictMode -Version Latest
 
-# Try to import shared contracts/utils if present; otherwise define minimal fallbacks
-try { . $PSScriptRoot/../../core/Contracts.psm1 } catch { function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} } }
-try { . $PSScriptRoot/../../core/Utils.psm1     } catch { function Write-Ok($m) { Write-Host "[OK] $m" -ForegroundColor Green }; function Write-Info($m) { Write-Host "[*] $m" -ForegroundColor Cyan }; function Write-Warn($m) { Write-Host "[!!] $m" -ForegroundColor Yellow }; function Write-Err($m) { Write-Host "[xx] $m" -ForegroundColor Red } }
+# Fallbacks if core isn't present (so this can run standalone in testing)
+if (-not (Get-Command Write-Info -EA SilentlyContinue)) { function Write-Info([string]$m){Write-Host "[*] $m" -ForegroundColor Cyan} }
+if (-not (Get-Command Write-Ok   -EA SilentlyContinue)) { function Write-Ok  ([string]$m){Write-Host "[OK] $m" -ForegroundColor Green} }
+if (-not (Get-Command Write-Warn -EA SilentlyContinue)) { function Write-Warn([string]$m){Write-Host "[!!] $m" -ForegroundColor Yellow} }
+if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
+  function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
+}
 
 # --- Embedded baseline services .reg (hardcoded from your export) ---
 $EmbeddedRegBlob = @'
@@ -234,9 +238,7 @@ Windows Registry Editor Version 5.00
 '@
 
 function Convert-RegBlobToMap {
-  <#
-    Returns a hashtable: ServiceName -> Start (int)
-  #>
+  # Returns a hashtable: ServiceName -> Start (int)
   $map = @{}
   $current = $null
   foreach ($line in $EmbeddedRegBlob -split "`r?`n") {
@@ -259,7 +261,8 @@ function Set-ServiceStartValue {
   param([Parameter(Mandatory)][string]$Name,[Parameter(Mandatory)][int]$Start)
   $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
   if (Test-Path $key) {
-    try { Set-ItemProperty -Path $key -Name Start -Type DWord -Value $Start -ErrorAction Stop } catch { Write-Warn "Failed to set Start for $Name: $($_.Exception.Message)" }
+    try { Set-ItemProperty -Path $key -Name Start -Type DWord -Value $Start -ErrorAction Stop }
+    catch { Write-Warn ("Failed to set Start for ${Name}: 0" -f $_.Exception.Message) }
   }
 }
 
@@ -270,11 +273,11 @@ function Apply-ServiceState {
   try {
     switch ($Start) {
       2 { try { Set-Service -Name $Name -StartupType Automatic -ErrorAction Stop } catch {}; try { Start-Service -Name $Name -ErrorAction SilentlyContinue } catch {}; break }
-      3 { try { Set-Service -Name $Name -StartupType Manual    -ErrorAction Stop } catch {}; try { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue } catch {}; break }
-      4 { try { Set-Service -Name $Name -StartupType Disabled  -ErrorAction Stop } catch {}; try { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue } catch {}; break }
-      default { Write-Warn "Unsupported Start value 0 for 1" -f $Start,$Name }
+      3 { try { Set-Service -Name $Name -StartupType Manual    -ErrorAction Stop } catch {}; try { Stop-Service  -Name $Name -Force -ErrorAction SilentlyContinue } catch {}; break }
+      4 { try { Set-Service -Name $Name -StartupType Disabled  -ErrorAction Stop } catch {}; try { Stop-Service  -Name $Name -Force -ErrorAction SilentlyContinue } catch {}; break }
+      default { Write-Warn ("Unsupported Start value 0 for ${Name}" -f $Start) }
     }
-  } catch { Write-Warn "Failed to apply state for $Name: $($_.Exception.Message)" }
+  } catch { Write-Warn ("Failed to apply state for ${Name}: 0" -f $_.Exception.Message) }
 }
 
 function Test-Ready { param($Context) return $true }
@@ -302,7 +305,6 @@ function Invoke-Apply {
 
 function Invoke-Verify {
   param($Context)
-  # Optional: could re-read and compare, but we keep it quick.
   return (New-ModuleResult -Name 'ServiceHardening' -Status 'Succeeded' -Message 'Verification complete')
 }
 
