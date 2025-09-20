@@ -1,4 +1,4 @@
-\
+﻿
     Set-StrictMode -Version Latest
 
     function Get-OSProfile {
@@ -51,3 +51,4 @@
     }
 
     Export-ModuleMember -Function Get-OSProfile,Get-Role,Get-InstalledFeatures,Detect-Stacks
+

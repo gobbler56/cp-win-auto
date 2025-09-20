@@ -1,4 +1,4 @@
-\
+﻿
     Set-StrictMode -Version Latest
     . $PSScriptRoot/../../core/Contracts.psm1
     . $PSScriptRoot/../../core/Utils.psm1
@@ -8,3 +8,4 @@
     function Invoke-Apply  { param($Context) return (New-ModuleResult -Name 'ApplicationSecurity' -Status 'Succeeded' -Message 'Applied umbrella (stub)') }
 
     Export-ModuleMember -Function Test-Ready,Invoke-Verify,Invoke-Apply
+

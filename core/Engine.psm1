@@ -1,120 +1,157 @@
-\
-    Set-StrictMode -Version Latest
-    . $PSScriptRoot/Utils.psm1
-    . $PSScriptRoot/Contracts.psm1
-    . $PSScriptRoot/Parsing.psm1
-    . $PSScriptRoot/Detection.psm1
-    . $PSScriptRoot/Profiles.psm1
+﻿Set-StrictMode -Version Latest
 
-    function Get-ModuleDescriptors {
-      param([string]$Root)
-      $mods = @()
-      $glob = Get-ChildItem -Path (Join-Path $Root 'modules') -Recurse -Filter module.json -File -ErrorAction SilentlyContinue
-      foreach ($m in $glob) {
-        $meta = Get-Content -LiteralPath $m.FullName -Raw | ConvertFrom-Json
-        $psm1 = Get-ChildItem -Path $m.DirectoryName -Filter *.psm1 | Select-Object -First 1
-        if ($null -eq $psm1) { continue }
-        $mods += [pscustomobject]@{
-          Name = $meta.name
-          Category = $meta.category
-          Priority = $meta.priority
-          Path = $psm1.FullName
-          Dir  = $m.DirectoryName
-          AppliesTo = $meta.appliesTo
-          DependsOn = $meta.dependsOn
-          Parallelizable = $meta.parallelizable
-        }
-      }
-      $mods
+# --- Imports (safe to import again even if Run.ps1 already did) ---
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+Import-Module -Force (Join-Path $here 'Utils.psm1')
+Import-Module -Force (Join-Path $here 'Contracts.psm1')
+Import-Module -Force (Join-Path $here 'Parsing.psm1')  # for Get-ReadmeInfo (OpenRouter)
+
+# --- Fallbacks if Utils/Contracts weren’t imported for some reason ---
+if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
+  function Write-Info([string]$m){Write-Host "[*] $m" -ForegroundColor Cyan}
+  function Write-Ok  ([string]$m){Write-Host "[OK] $m" -ForegroundColor Green}
+  function Write-Warn([string]$m){Write-Host "[!!] $m" -ForegroundColor Yellow}
+  function Write-Err ([string]$m){Write-Host "[xx] $m" -ForegroundColor Red}
+}
+if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
+  function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message)
+    [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
+}
+
+# --- Minimal OS/Context helpers ---
+function Get-OSId {
+  try {
+    $os = Get-CimInstance Win32_OperatingSystem
+    $build = [int]$os.BuildNumber
+    if ($os.Caption -match 'Windows 11') { return 'win11' }
+    elseif ($build -ge 20348) { return 'server2022' }   # 20348 = Server 2022
+    elseif ($build -ge 17763) { return 'server2019' }   # 17763 = Server 2019
+  } catch {}
+  return 'win11'
+}
+function Get-OSProfile { param([string]$Profile) return $Profile }
+
+function Build-Context {
+  param([string]$Root)
+  $readme = $null
+  try { $readme = Get-ReadmeInfo -Root $Root } catch { Write-Warn "README parse failed: $($_.Exception.Message)"; $readme = [pscustomobject]@{ AuthorizedUsers=@(); AuthorizedAdmins=@(); Directives=[pscustomobject]@{}; SourcePath=$null } }
+  $auto = $null
+  try { $auto = Get-AutoLogonUser } catch {}
+  [pscustomobject]@{
+    Root          = $Root
+    OS            = Get-OSId
+    Readme        = $readme
+    AutoLogonUser = $auto
+    Timestamp     = Get-Date
+  }
+}
+
+# --- Module discovery: supports BOTH direct and nested layouts ---
+function Get-Modules {
+  param([Parameter(Mandatory)][string]$Root)
+
+  $modsRoot = Join-Path $Root 'modules'
+  if (-not (Test-Path $modsRoot)) { return @() }
+
+  $out = @()
+
+  foreach ($catDir in Get-ChildItem -Path $modsRoot -Directory) {
+    # Priority default from NN_ prefix (e.g., "06_ServiceAuditing" => 6*100 = 600)
+    $folderPriority = 9999
+    if ($catDir.Name -match '^(\d{2})_') { $folderPriority = [int]$Matches[1] * 100 }
+
+    # --- DIRECT layout: *.psm1 directly under the category folder ---
+    $catMetaPath = Join-Path $catDir.FullName 'module.json'
+    $catMeta = $null
+    if (Test-Path $catMetaPath) {
+      try { $catMeta = Get-Content -LiteralPath $catMetaPath -Raw | ConvertFrom-Json } catch {}
     }
 
-    function Start-Engine {
-      param(
-        [ValidateSet('Apply','Verify')][string]$Mode,
-        [string]$Profile,
-        [string]$Overlay,
-        [int]$MaxParallel = 8,
-        [bool]$WhatIf = $false,
-        [Parameter(Mandatory)][string]$Root
-      )
+    $directPsm1s = Get-ChildItem -Path $catDir.FullName -Filter *.psm1 -File -EA SilentlyContinue
+    foreach ($psm1 in $directPsm1s) {
+      # per-file json (optional): <BaseName>.json sitting next to the psm1
+      $peerJson = Join-Path $catDir.FullName ($psm1.BaseName + '.json')
+      $meta = $catMeta
+      if (Test-Path $peerJson) { try { $meta = Get-Content -LiteralPath $peerJson -Raw | ConvertFrom-Json } catch {} }
 
-      Write-Info "Starting engine (Mode=$Mode, Profile=$Profile, Overlay=$Overlay)"
-      $os  = if ($Profile -eq 'Auto') { Get-OSProfile } else { $Profile }
-      $role= Get-Role
-      Write-Info "Detected OS: $os; Role: $role"
+      $prio = if ($meta -and $meta.priority) { [int]$meta.priority } else { $folderPriority }
+      $name = if ($meta -and $meta.name) { $meta.name } else { $psm1.BaseName }
 
-      $profile = Load-Profile -OS $os -Overlay $Overlay -Root $Root
-      $detections = Detect-Stacks
-      $readme = Get-ReadmeInfo -Root $Root
-
-      $ctx = [pscustomobject]@{
-        Root        = $Root
-        OS          = $os
-        Role        = $role
-        Profile     = $profile
-        Detections  = $detections
-        Readme      = $readme
-        Mode        = $Mode
-        MaxParallel = $MaxParallel
-        WhatIf      = $WhatIf
+      $out += [pscustomobject]@{
+        Name     = $name
+        Category = $catDir.Name
+        Path     = $psm1.FullName
+        Priority = $prio
+        Meta     = $meta
       }
-
-      $mods = Get-ModuleDescriptors -Root $Root
-      # filter by appliesTo
-      $mods = $mods | Where-Object {
-        $okOs = -not $_.AppliesTo.os -or ($_.AppliesTo.os -contains $os)
-        $okRole = -not $_.AppliesTo.role -or ($_.AppliesTo.role -contains $role)
-        $okOs -and $okRole
-      }
-
-      # Order modules
-      $order = @()
-      foreach ($cat in $profile.CategoryOrder) {
-        $order += $mods | Where-Object Category -eq $cat | Sort-Object Priority
-      }
-      $remaining = $mods | Where-Object { $order -notcontains $_ }
-      $plan = @($order + $remaining)
-
-      foreach ($m in $plan) {
-        $toggleKey = if ($m.Name -and $m.Category) { "$($m.Category)/$($m.Name)" } else { $m.Name }
-        if ($profile.ModuleToggles.ContainsKey($toggleKey) -and -not $profile.ModuleToggles[$toggleKey]) {
-          Write-Warn "Skipping $toggleKey (disabled by profile)"
-          continue
-        }
-        Write-Info "Loading module: $($m.Name) ($($m.Category))"
-        $mod = Import-Module -PassThru -Force -Name $m.Path
-        $fReady  = Get-Command -Module $mod -Name Test-Ready -ErrorAction SilentlyContinue
-        $fApply  = Get-Command -Module $mod -Name Invoke-Apply -ErrorAction SilentlyContinue
-        $fVerify = Get-Command -Module $mod -Name Invoke-Verify -ErrorAction SilentlyContinue
-        if (-not $fApply) { Write-Warn "Module $($m.Name) has no Invoke-Apply; skipping"; continue }
-
-        $ready = $true
-        if ($fReady) { $ready = Test-Ready -Context $ctx }
-
-        if (-not $ready) {
-          Write-Warn "Module $($m.Name) not ready; skipping"
-          continue
-        }
-
-        try {
-          $res = if ($ctx.Mode -eq 'Verify' -and $fVerify) {
-            Invoke-Verify -Context $ctx
-          } else {
-            Invoke-Apply -Context $ctx
-          }
-          if ($res -and $res.Status -eq 'Succeeded') {
-            Write-Ok "$($m.Name): $($res.Message)"
-          } elseif ($res -and $res.Status -eq 'Skipped') {
-            Write-Warn "$($m.Name): $($res.Message)"
-          } else {
-            Write-Err "$($m.Name): $($res.Message)"
-          }
-        } catch {
-          Write-Err "$($m.Name): $_"
-        }
-      }
-
-      Write-Ok "Engine complete."
     }
 
-    Export-ModuleMember -Function Start-Engine
+    # --- NESTED layout: look one level deeper for submodule folders with their own psm1 ---
+    foreach ($modDir in Get-ChildItem -Path $catDir.FullName -Directory -EA SilentlyContinue) {
+      $psm1 = Get-ChildItem -Path $modDir.FullName -Filter *.psm1 -File -EA SilentlyContinue | Select-Object -First 1
+      if (-not $psm1) { continue }
+      $jsonPath = Join-Path $modDir.FullName 'module.json'
+      $meta = $null
+      if (Test-Path $jsonPath) { try { $meta = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json } catch {} }
+      $prio = if ($meta -and $meta.priority) { [int]$meta.priority } else { $folderPriority }
+      $name = if ($meta -and $meta.name) { $meta.name } else { $modDir.Name }
+      $out += [pscustomobject]@{
+        Name     = $name
+        Category = $catDir.Name
+        Path     = $psm1.FullName
+        Priority = $prio
+        Meta     = $meta
+      }
+    }
+  }
+
+  $out | Sort-Object Priority, Category, Name
+}
+
+function Start-Engine {
+  [CmdletBinding()]
+  param(
+    [ValidateSet('Apply','Verify')][string]$Mode = 'Apply',
+    [string]$Profile = 'Auto',
+    [string]$Overlay,
+    [int]$MaxParallel = 8,
+    [switch]$WhatIf,
+    [Parameter(Mandatory)][string]$Root
+  )
+
+  Write-Info "Starting engine (Mode=$Mode, Profile=$Profile, Overlay=$Overlay)"
+
+  $ctx  = Build-Context -Root $Root
+  $mods = Get-Modules  -Root $Root
+  if (-not $mods -or $mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
+
+  Write-Info ("Discovered {0} module(s): {1}" -f $mods.Count, ($mods | ForEach-Object {{ $_.Name }} -join ', '))
+
+  foreach ($m in $mods) {
+    try {
+      Import-Module -Force -Name $m.Path
+      $fnApply  = Get-Command -Name 'Invoke-Apply' -EA SilentlyContinue
+      $fnVerify = Get-Command -Name 'Invoke-Verify' -EA SilentlyContinue
+      $fnReady  = Get-Command -Name 'Test-Ready'    -EA SilentlyContinue
+
+      if ($fnReady) {
+        $ok = $true
+        try { $ok = Test-Ready -Context $ctx } catch {}
+        if ($ok -is [bool] -and -not $ok) { Write-Warn "Skipping $($m.Name) (Test-Ready=false)"; continue }
+      }
+
+      $fn = if ($Mode -eq 'Apply') { $fnApply } else { $fnVerify }
+      if (-not $fn) { Write-Warn "Module $($m.Name) loaded but no function for Mode=$Mode"; continue }
+
+      Write-Info ("Running {0} (prio {1})" -f $m.Name,$m.Priority)
+      & $fn -Context $ctx | Out-Null
+      Write-Ok "$($m.Name) completed"
+    } catch {
+      Write-Err ("{0} failed: {1}" -f $m.Name, $_.Exception.Message)
+    }
+  }
+
+  Write-Ok "All modules done"
+}
+
+Export-ModuleMember -Function Start-Engine, Get-OSProfile

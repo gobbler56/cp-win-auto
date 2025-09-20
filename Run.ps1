@@ -1,4 +1,4 @@
-\
+﻿
     [CmdletBinding()]
     param(
       [ValidateSet('Apply','Verify')][string]$Mode = 'Apply',
@@ -25,3 +25,4 @@
     }
 
     Start-Engine @params
+

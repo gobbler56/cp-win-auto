@@ -1,4 +1,4 @@
-\
+﻿
     Set-StrictMode -Version Latest
     . $PSScriptRoot/Utils.psm1
 
@@ -22,3 +22,4 @@
     }
 
     Export-ModuleMember -Function Load-Profile
+
