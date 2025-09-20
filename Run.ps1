@@ -1,28 +1,33 @@
-﻿
-    [CmdletBinding()]
-    param(
-      [ValidateSet('Apply','Verify')][string]$Mode = 'Apply',
-      [string]$Profile = 'Auto',
-      [string]$Overlay,
-      [int]$MaxParallel = 8,
-      [switch]$WhatIf
-    )
+﻿#Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+  [ValidateSet('Apply','Verify')][string]$Mode = 'Apply',
+  [string]$Profile = 'Auto',
+  [string]$Overlay,
+  [int]$MaxParallel = 8,
+  [switch]$Interactive,
+  [string[]]$Modules,
+  [string[]]$ExcludeModules
+)
 
-    $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
-    $ErrorActionPreference = 'Stop'
-    Set-StrictMode -Version Latest
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-    $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-    Import-Module -Force -Name (Join-Path $Root 'core/Engine.psm1')
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Import-Module -Force -Name (Join-Path $Root 'core/Utils.psm1')
+Import-Module -Force -Name (Join-Path $Root 'core/Contracts.psm1')
+Import-Module -Force -Name (Join-Path $Root 'core/Engine.psm1')
 
-    $params = @{
-      Mode        = $Mode
-      Profile     = $Profile
-      Overlay     = $Overlay
-      MaxParallel = $MaxParallel
-      WhatIf      = [bool]$WhatIf
-      Root        = $Root
-    }
+$params = @{
+  Mode           = $Mode
+  Profile        = $Profile
+  Overlay        = $Overlay
+  MaxParallel    = $MaxParallel
+  Root           = $Root
+  Interactive    = [bool]$Interactive
+  IncludeModules = $Modules
+  ExcludeModules = $ExcludeModules
+}
 
-    Start-Engine @params
-
+Start-Engine @params

@@ -1,12 +1,11 @@
 ﻿Set-StrictMode -Version Latest
 
-# --- Imports (safe to import again even if Run.ps1 already did) ---
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Import-Module -Force (Join-Path $here 'Utils.psm1')
 Import-Module -Force (Join-Path $here 'Contracts.psm1')
-Import-Module -Force (Join-Path $here 'Parsing.psm1')  # for Get-ReadmeInfo (OpenRouter)
+# Parsing is optional; modules can still run if README parse fails
+Import-Module -Force (Join-Path $here 'Parsing.psm1') -ErrorAction SilentlyContinue
 
-# --- Fallbacks if Utils/Contracts weren’t imported for some reason ---
 if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
   function Write-Info([string]$m){Write-Host "[*] $m" -ForegroundColor Cyan}
   function Write-Ok  ([string]$m){Write-Host "[OK] $m" -ForegroundColor Green}
@@ -18,14 +17,13 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
     [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
-# --- Minimal OS/Context helpers ---
 function Get-OSId {
   try {
     $os = Get-CimInstance Win32_OperatingSystem
     $build = [int]$os.BuildNumber
     if ($os.Caption -match 'Windows 11') { return 'win11' }
-    elseif ($build -ge 20348) { return 'server2022' }   # 20348 = Server 2022
-    elseif ($build -ge 17763) { return 'server2019' }   # 17763 = Server 2019
+    elseif ($build -ge 20348) { return 'server2022' }
+    elseif ($build -ge 17763) { return 'server2019' }
   } catch {}
   return 'win11'
 }
@@ -34,7 +32,8 @@ function Get-OSProfile { param([string]$Profile) return $Profile }
 function Build-Context {
   param([string]$Root)
   $readme = $null
-  try { $readme = Get-ReadmeInfo -Root $Root } catch { Write-Warn "README parse failed: $($_.Exception.Message)"; $readme = [pscustomobject]@{ AuthorizedUsers=@(); AuthorizedAdmins=@(); Directives=[pscustomobject]@{}; SourcePath=$null } }
+  try { $readme = Get-ReadmeInfo -Root $Root } catch { Write-Warn ("README parse failed: {0}" -f $_.Exception.Message) }
+  if (-not $readme) { $readme = [pscustomobject]@{ AuthorizedUsers=@(); AuthorizedAdmins=@(); Directives=[pscustomobject]@{}; SourcePath=$null } }
   $auto = $null
   try { $auto = Get-AutoLogonUser } catch {}
   [pscustomobject]@{
@@ -46,66 +45,60 @@ function Build-Context {
   }
 }
 
-# --- Module discovery: supports BOTH direct and nested layouts ---
+# discovery supports BOTH: direct (NN_Category\*.psm1) and nested (NN_Category\Module\*.psm1)
 function Get-Modules {
   param([Parameter(Mandatory)][string]$Root)
-
   $modsRoot = Join-Path $Root 'modules'
   if (-not (Test-Path $modsRoot)) { return @() }
-
   $out = @()
-
   foreach ($catDir in Get-ChildItem -Path $modsRoot -Directory) {
-    # Priority default from NN_ prefix (e.g., "06_ServiceAuditing" => 6*100 = 600)
     $folderPriority = 9999
     if ($catDir.Name -match '^(\d{2})_') { $folderPriority = [int]$Matches[1] * 100 }
 
-    # --- DIRECT layout: *.psm1 directly under the category folder ---
+    # direct
     $catMetaPath = Join-Path $catDir.FullName 'module.json'
-    $catMeta = $null
-    if (Test-Path $catMetaPath) {
-      try { $catMeta = Get-Content -LiteralPath $catMetaPath -Raw | ConvertFrom-Json } catch {}
-    }
-
-    $directPsm1s = Get-ChildItem -Path $catDir.FullName -Filter *.psm1 -File -EA SilentlyContinue
-    foreach ($psm1 in $directPsm1s) {
-      # per-file json (optional): <BaseName>.json sitting next to the psm1
+    $catMeta = $null; if (Test-Path $catMetaPath) { try { $catMeta = Get-Content -LiteralPath $catMetaPath -Raw | ConvertFrom-Json } catch {} }
+    foreach ($psm1 in (Get-ChildItem -Path $catDir.FullName -Filter *.psm1 -File -EA SilentlyContinue)) {
       $peerJson = Join-Path $catDir.FullName ($psm1.BaseName + '.json')
-      $meta = $catMeta
-      if (Test-Path $peerJson) { try { $meta = Get-Content -LiteralPath $peerJson -Raw | ConvertFrom-Json } catch {} }
-
+      $meta = $catMeta; if (Test-Path $peerJson) { try { $meta = Get-Content -LiteralPath $peerJson -Raw | ConvertFrom-Json } catch {} }
       $prio = if ($meta -and $meta.priority) { [int]$meta.priority } else { $folderPriority }
       $name = if ($meta -and $meta.name) { $meta.name } else { $psm1.BaseName }
-
-      $out += [pscustomobject]@{
-        Name     = $name
-        Category = $catDir.Name
-        Path     = $psm1.FullName
-        Priority = $prio
-        Meta     = $meta
-      }
+      $out += [pscustomobject]@{ Name=$name; Category=$catDir.Name; Path=$psm1.FullName; Priority=$prio; Meta=$meta }
     }
 
-    # --- NESTED layout: look one level deeper for submodule folders with their own psm1 ---
+    # nested
     foreach ($modDir in Get-ChildItem -Path $catDir.FullName -Directory -EA SilentlyContinue) {
       $psm1 = Get-ChildItem -Path $modDir.FullName -Filter *.psm1 -File -EA SilentlyContinue | Select-Object -First 1
       if (-not $psm1) { continue }
       $jsonPath = Join-Path $modDir.FullName 'module.json'
-      $meta = $null
-      if (Test-Path $jsonPath) { try { $meta = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json } catch {} }
+      $meta = $null; if (Test-Path $jsonPath) { try { $meta = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json } catch {} }
       $prio = if ($meta -and $meta.priority) { [int]$meta.priority } else { $folderPriority }
       $name = if ($meta -and $meta.name) { $meta.name } else { $modDir.Name }
-      $out += [pscustomobject]@{
-        Name     = $name
-        Category = $catDir.Name
-        Path     = $psm1.FullName
-        Priority = $prio
-        Meta     = $meta
-      }
+      $out += [pscustomobject]@{ Name=$name; Category=$catDir.Name; Path=$psm1.FullName; Priority=$prio; Meta=$meta }
     }
   }
-
   $out | Sort-Object Priority, Category, Name
+}
+
+# filter utilities
+function Select-ModulesByName {
+  param([object[]]$Modules, [string[]]$Include, [string[]]$Exclude)
+
+  if ($Include -and $Include.Count -gt 0) {
+    $wanted = @()
+    foreach ($pat in $Include) {
+      $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
+      $wanted += $Modules | Where-Object { $_.Name -match $rx -or $_.Category -match $rx }
+    }
+    $Modules = $wanted | Select-Object -Unique
+  }
+  if ($Exclude -and $Exclude.Count -gt 0) {
+    foreach ($pat in $Exclude) {
+      $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
+      $Modules = $Modules | Where-Object { $_.Name -notmatch $rx -and $_.Category -notmatch $rx }
+    }
+  }
+  $Modules
 }
 
 function Start-Engine {
@@ -116,7 +109,10 @@ function Start-Engine {
     [string]$Overlay,
     [int]$MaxParallel = 8,
     [switch]$WhatIf,
-    [Parameter(Mandatory)][string]$Root
+    [Parameter(Mandatory)][string]$Root,
+    [string[]]$IncludeModules,
+    [string[]]$ExcludeModules,
+    [switch]$Interactive
   )
 
   Write-Info "Starting engine (Mode=$Mode, Profile=$Profile, Overlay=$Overlay)"
@@ -125,7 +121,33 @@ function Start-Engine {
   $mods = Get-Modules  -Root $Root
   if (-not $mods -or $mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
 
-  Write-Info ("Discovered {0} module(s): {1}" -f $mods.Count, ($mods | ForEach-Object {{ $_.Name }} -join ', '))
+  # Interactive selection
+  if ($Interactive) {
+    Write-Host ""
+    Write-Host "Select modules to run (comma-separated indexes or names; 'all' for everything):" -ForegroundColor Cyan
+    $i = 1
+    foreach ($m in $mods) { Write-Host ("  {0,2}. {1}  [{2}]" -f $i,$m.Name,$m.Category) ; $i++ }
+    $choice = Read-Host "Your selection"
+    if ($choice -and $choice.ToLower() -ne 'all') {
+      $tokens = $choice -split '[\s,]+' | Where-Object { $_ }
+      $include = @()
+      foreach ($t in $tokens) {
+        if ($t -match '^\d+$') {
+          $idx = [int]$t
+          if ($idx -ge 1 -and $idx -le $mods.Count) { $include += $mods[$idx-1].Name }
+        } else {
+          $include += $t
+        }
+      }
+      $mods = Select-ModulesByName -Modules $mods -Include $include
+    }
+  } else {
+    $mods = Select-ModulesByName -Modules $mods -Include $IncludeModules -Exclude $ExcludeModules
+  }
+
+  if (-not $mods -or $mods.Count -eq 0) { Write-Warn "No modules selected. Exiting."; return }
+
+  Write-Info ("Running {0} module(s): {1}" -f $mods.Count, ($mods | ForEach-Object { $_.Name } -join ', '))
 
   foreach ($m in $mods) {
     try {
@@ -151,7 +173,7 @@ function Start-Engine {
     }
   }
 
-  Write-Ok "All modules done"
+  Write-Ok "All selected modules done"
 }
 
 Export-ModuleMember -Function Start-Engine, Get-OSProfile

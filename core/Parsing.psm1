@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 . $PSScriptRoot/Utils.psm1
-Import-Module "$PSScriptRoot/NLP.OpenRouter.psm1" -Force
+Import-Module "$PSScriptRoot/NLP.OpenRouter.psm1" -ErrorAction SilentlyContinue
 
 function Remove-HTMLTags {
   param([string]$content)
@@ -30,11 +30,11 @@ function Get-ReadmeHtmlFromUrlFile {
             $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -ErrorAction Stop
             return [pscustomobject]@{ Url=$url; Html=$resp.Content }
           } catch {
-            throw "Failed to download README from $url: $($_.Exception.Message)"
+            throw ("Failed to download README from {0}: {1}" -f $url, $_.Exception.Message)
           }
         }
       }
-      throw "README.url found but URL= line missing in $p"
+      throw ("README.url found but URL= line missing in {0}" -f $p)
     }
   }
   throw "No README.url file found in default locations."
@@ -43,49 +43,70 @@ function Get-ReadmeHtmlFromUrlFile {
 function Get-ReadmeInfo {
   param([string]$Root = $PSScriptRoot)
 
-  $fetch = Get-ReadmeHtmlFromUrlFile
-  $rawHtml   = $fetch.Html
-  $plainText = Remove-HTMLTags -content $rawHtml
-
-  $doc = Invoke-ReadmeExtraction -RawHtml $rawHtml -PlainText $plainText
-  if (-not $doc) { throw "Model returned no data." }
-
-  # Normalize to engine shape
-  $admins = @()
-  $users  = @()
-  $groups = @{}
-
-  foreach ($u in $doc.all_users) {
-    $users += $u.name
-    if ($u.account_type -eq 'admin') { $admins += $u.name }
-    if ($u.groups) {
-      foreach ($g in $u.groups) {
-        if (-not $groups.ContainsKey($g)) { $groups[$g] = @() }
-        $groups[$g] += $u.name
-      }
+  try {
+    $fetch = Get-ReadmeHtmlFromUrlFile
+  } catch {
+    # If README isn't present, return an empty structure so modules can still run.
+    return [pscustomobject]@{
+      AuthorizedUsers  = @()
+      AuthorizedAdmins = @()
+      Notes            = @()
+      Directives       = [pscustomobject]@{ GroupsToCreate=@(); GroupMembersToAdd=@{}; UsersToCreate=@(); CriticalServices=@() }
+      SourcePath       = $null
     }
   }
 
-  # Build directives the module will consume
-  $directives = [ordered]@{
-    GroupsToCreate            = @($groups.Keys | Select-Object -Unique)
-    GroupMembersToAdd         = @{}
-    UsersToCreate             = @()   # we don't “guess” new vs existing; module will create if missing anyway
-    TerminatedUsers           = @()
-    UnauthorizedUsersExplicit = @()
-    EnsureGuestDisabled       = $true
-    EnsureAdministratorDisabled = $true
-    CriticalServices          = @($doc.critical_services)
-  }
-  foreach ($k in $groups.Keys) {
-    $directives.GroupMembersToAdd[$k] = @($groups[$k] | Select-Object -Unique)
+  $rawHtml   = $fetch.Html
+  $plainText = Remove-HTMLTags -content $rawHtml
+
+  # Use OpenRouter extraction if available; else return minimal
+  if (Get-Command Invoke-ReadmeExtraction -ErrorAction SilentlyContinue) {
+    try {
+      $doc = Invoke-ReadmeExtraction -RawHtml $rawHtml -PlainText $plainText
+      if ($doc) {
+        $admins = @()
+        $users  = @()
+        $groups = @{}
+        foreach ($u in $doc.all_users) {
+          $users += $u.name
+          if ($u.account_type -eq 'admin') { $admins += $u.name }
+          if ($u.groups) {
+            foreach ($g in $u.groups) {
+              if (-not $groups.ContainsKey($g)) { $groups[$g] = @() }
+              $groups[$g] += $u.name
+            }
+          }
+        }
+        $directives = [ordered]@{
+          GroupsToCreate            = @($groups.Keys | Select-Object -Unique)
+          GroupMembersToAdd         = @{} 
+          UsersToCreate             = @()
+          TerminatedUsers           = @()
+          UnauthorizedUsersExplicit = @()
+          EnsureGuestDisabled       = $true
+          EnsureAdministratorDisabled = $true
+          CriticalServices          = @($doc.critical_services)
+        }
+        foreach ($k in $groups.Keys) { $directives.GroupMembersToAdd[$k] = @($groups[$k] | Select-Object -Unique) }
+        return [pscustomobject]@{
+          AuthorizedUsers  = @($users | Select-Object -Unique)
+          AuthorizedAdmins = @($admins | Select-Object -Unique)
+          Notes            = @()
+          Directives       = [pscustomobject]$directives
+          SourcePath       = $fetch.Url
+        }
+      }
+    } catch {
+      Write-Warn ("OpenRouter parse failed: {0}" -f $_.Exception.Message)
+    }
   }
 
+  # Fallback: empty structure
   return [pscustomobject]@{
-    AuthorizedUsers  = @($users | Select-Object -Unique)
-    AuthorizedAdmins = @($admins | Select-Object -Unique)
+    AuthorizedUsers  = @()
+    AuthorizedAdmins = @()
     Notes            = @()
-    Directives       = [pscustomobject]$directives
+    Directives       = [pscustomobject]@{ GroupsToCreate=@(); GroupMembersToAdd=@{}; UsersToCreate=@(); CriticalServices=@() }
     SourcePath       = $fetch.Url
   }
 }
