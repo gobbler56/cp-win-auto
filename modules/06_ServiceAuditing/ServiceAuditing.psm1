@@ -8,7 +8,7 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
   function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
-# --- Your embedded baseline export ---
+# --- YOUR embedded baseline export ---
 $EmbeddedRegBlob = @'
 Windows Registry Editor Version 5.00
 
@@ -250,33 +250,56 @@ function Parse-RegServices {
   $map
 }
 
-function Invoke-RegistryApply-Local([hashtable]$Map) {
-  foreach($name in $Map.Keys){
-    $start = [int]$Map[$name]
-    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
-    if (-not (Test-Path $key)) { continue }
-    try { Set-ItemProperty -Path $key -Name Start -Type DWord -Value $start -Force -ErrorAction Stop }
-    catch { Write-Warn ("Local write failed for {0}: {1}" -f $name, $_.Exception.Message) }
+function Ensure-NtObjectManager {
+  try { Import-Module NtObjectManager -ErrorAction Stop; return $true } catch {
+    try {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      if (-not (Get-PackageProvider -Name NuGet -EA SilentlyContinue)) {
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+      }
+      $repo = Get-PSRepository -Name PSGallery -EA SilentlyContinue
+      if (-not $repo) { Register-PSRepository -Default }
+      elseif ($repo.InstallationPolicy -ne 'Trusted') { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted }
+      Install-Module -Name NtObjectManager -Repository PSGallery -Force -Scope AllUsers -AllowClobber -AcceptLicense
+      Import-Module NtObjectManager -ErrorAction Stop
+      return $true
+    } catch {
+      Write-Warn ("Failed to install/import NtObjectManager: {0}" -f $_.Exception.Message)
+      return $false
+    }
   }
 }
 
-function Invoke-RegistryApply-TI([hashtable]$Map) {
-  try {
-    Import-Module NtObjectManager -ErrorAction Stop
-  } catch {
-    Write-Warn "NtObjectManager not available; falling back to local writes."
-    Invoke-RegistryApply-Local -Map $Map
-    return
-  }
-  try { Start-Service -Name TrustedInstaller -ErrorAction SilentlyContinue } catch {}
-  $ti = $null
-  try { $ti = Get-NtProcess -ServiceName TrustedInstaller -ErrorAction Stop } catch {
-    Write-Warn "TrustedInstaller process not found; fallback to local writes."
-    Invoke-RegistryApply-Local -Map $Map
+function TI-ApplyStartValues([hashtable]$Map) {
+  $haveTI = Ensure-NtObjectManager
+  if (-not $haveTI) {
+    Write-Warn "NtObjectManager not available; applying locally (protected services may fail)."
+    foreach($name in $Map.Keys){
+      $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+      if (Test-Path $key) {
+        try { Set-ItemProperty -Path $key -Name Start -Type DWord -Value ([int]$Map[$name]) -Force -ErrorAction Stop }
+        catch { Write-Warn ("Local write failed for {0}: {1}" -f $name, $_.Exception.Message) }
+      }
+    }
     return
   }
 
-  # Build a self-contained child payload that writes Start values and exits quietly
+  try { Start-Service -Name TrustedInstaller -ErrorAction SilentlyContinue } catch {}
+  $ti = $null
+  try { $ti = Get-NtProcess -ServiceName TrustedInstaller -ErrorAction Stop } catch {}
+  if (-not $ti) {
+    Write-Warn "TrustedInstaller process not found; applying locally."
+    foreach($name in $Map.Keys){
+      $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+      if (Test-Path $key) {
+        try { Set-ItemProperty -Path $key -Name Start -Type DWord -Value ([int]$Map[$name]) -Force -ErrorAction Stop }
+        catch { Write-Warn ("Local write failed for {0}: {1}" -f $name, $_.Exception.Message) }
+      }
+    }
+    return
+  }
+
+  # Build a compact payload for the TI child
   $pairs = $Map.GetEnumerator() | ForEach-Object {
     "'{0}'={1}" -f $_.Key.Replace("'", "''"), [int]$_.Value
   } -join ';'
@@ -290,16 +313,15 @@ foreach(`$k in `$pairs.Keys){
   }
 }
 "@
-
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
+  $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+
   try {
-    $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
     $proc = New-Win32Process powershell.exe -CreationFlags CreateNoWindow -ParentProcess $ti -CommandLine $cmd
     Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
     Write-Ok "TI registry apply complete"
   } catch {
     Write-Warn ("TI spawn failed: {0}" -f $_.Exception.Message)
-    Invoke-RegistryApply-Local -Map $Map
   }
 }
 
@@ -321,10 +343,10 @@ function Invoke-Apply { param($Context)
   Write-Info "Parsing embedded services baseline (.reg) ..."
   $map = Parse-RegServices
 
-  # 1) Apply Start values under TI if possible (falls back automatically)
-  Invoke-RegistryApply-TI -Map $map
+  # 1) Write Start values with TI (falls back locally if needed)
+  TI-ApplyStartValues -Map $map
 
-  # 2) Apply runtime state to satisfy scoring
+  # 2) Apply runtime state for scoring
   $touched = 0
   foreach($name in $map.Keys){
     Apply-ServiceState -Name $name -Start ([int]$map[$name])
