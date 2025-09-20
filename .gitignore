@@ -1,6 +1,5 @@
 # PowerShell
 *.psd1
-*.psm1
 *.ps1
 !Run.ps1
 # VS Code
