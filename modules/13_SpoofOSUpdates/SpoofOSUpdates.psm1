@@ -340,9 +340,6 @@ function TI-UpdateSystemFiles {
 `$files = @($filesArray)
 `$displayVersion = '$displayVersion'
 
-# C# type should already be compiled in parent session
-# We'll use the OSVersionResourceEditor type that should be available
-
 function Get-FourPartVersion {
   param([string]`$Version)
   `$parts = (`$Version -split '\D+') | Where-Object { `$_ -ne "" } | Select-Object -First 4
@@ -387,6 +384,8 @@ foreach (`$filePath in `$files) {
 
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
   $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+
+  try {
     $proc = New-Win32Process powershell.exe -CreationFlags CreateNoWindow -ParentProcess $ti -CommandLine $cmd
     Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
     Write-Ok "TrustedInstaller file update process completed"
