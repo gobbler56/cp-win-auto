@@ -52,15 +52,58 @@ function Get-RootsToScan {
   $roots | Select-Object -Unique
 }
 
+function Get-ExcludedPaths {
+  # System paths that don't need fake updates for scoring
+  @(
+    'C:\Program Files\Windows Mail',
+    'C:\Program Files\Windows Media Player',
+    'C:\Program Files\Windows NT',
+    'C:\Program Files\Windows Photo Viewer',
+    'C:\Program Files\WindowsApps',
+    'C:\Program Files\WindowsPowerShell',
+    'C:\Program Files\Windows Defender Advanced Threat Protection',
+    'C:\Program Files\Windows Defender',
+    'C:\Program Files\VMware',
+    'C:\Program Files\Internet Explorer',
+    'C:\Program Files\Common Files',
+    'C:\Program Files (x86)\Common Files',
+    'C:\Program Files (x86)\Internet Explorer',
+    'C:\Program Files (x86)\Microsoft',
+    'C:\Program Files (x86)\Windows Defender',
+    'C:\Program Files (x86)\Windows Mail',
+    'C:\Program Files (x86)\Windows Media Player',
+    'C:\Program Files (x86)\Windows NT',
+    'C:\Program Files (x86)\Windows Photo Viewer',
+    'C:\Program Files (x86)\WindowsPowerShell',
+    'C:\ProgramData\Microsoft',
+    'C:\ProgramData\Microsoft OneDrive',
+    'C:\ProgramData\Packages',
+    'C:\ProgramData\Package Cache',
+    'C:\ProgramData\VMware'
+  )
+}
+
+function Test-PathExcluded {
+  param([string]$Path, [string[]]$ExcludedPaths)
+  foreach ($excluded in $ExcludedPaths) {
+    if ($Path -like "$excluded*") { return $true }
+  }
+  return $false
+}
+
 # PS-version-aware EXE enumeration (no silent failure)
 function Get-ExecutableFiles {
-  param([string[]]$Roots)
+  param([string[]]$Roots, [string[]]$ExcludedPaths = @())
 
   $results = New-Object System.Collections.Generic.List[string]
   $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
 
   foreach ($root in $Roots) {
     if (-not (Test-Path -LiteralPath $root)) { continue }
+    
+    # Skip if this entire root is excluded
+    if (Test-PathExcluded -Path $root -ExcludedPaths $ExcludedPaths) { continue }
+    
     try {
       if ($isPS7) {
         # Fast path (PS7 / .NET)
@@ -72,11 +115,13 @@ function Get-ExecutableFiles {
 
         foreach ($path in [System.IO.Directory]::EnumerateFiles($root, '*.exe', $opts)) {
           if ($path -like '*\WindowsApps\*') { continue }  # skip UWP sandbox
+          if (Test-PathExcluded -Path $path -ExcludedPaths $ExcludedPaths) { continue }
           $results.Add($path)
         }
       } else {
         # Reliable path (Windows PowerShell 5.1)
         Get-ChildItem -LiteralPath $root -Filter *.exe -File -Recurse -Force -ErrorAction SilentlyContinue |
+          Where-Object { -not (Test-PathExcluded -Path $_.FullName -ExcludedPaths $ExcludedPaths) } |
           ForEach-Object { $results.Add($_.FullName) }
       }
     } catch {
@@ -172,7 +217,10 @@ function Invoke-Apply {
   $roots  = @(Get-RootsToScan)
   Write-Info ("AppUpdates roots: {0}" -f ($roots -join '; '))
 
-  $exeList = @(Get-ExecutableFiles -Roots $roots)
+  $excludedPaths = Get-ExcludedPaths
+  Write-Info ("Excluding {0} system paths from scanning" -f $excludedPaths.Count)
+  
+  $exeList = @(Get-ExecutableFiles -Roots $roots -ExcludedPaths $excludedPaths)
   Write-Info ("Found {0} executables (post-filter)" -f $exeList.Count)
 
   $touchedFiles = 0
