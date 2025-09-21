@@ -1,8 +1,11 @@
-﻿
-    Set-StrictMode -Version Latest
-    . $PSScriptRoot/Utils.psm1
 
-    function Load-Profile {
+    Set-StrictMode -Version Latest
+
+# Import required modules if not already loaded
+if (-not (Get-Command Import-Json -EA SilentlyContinue)) {
+  Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot 'Utils.psm1')
+}
+
       param(
         [Parameter(Mandatory)][string]$OS,
         [string]$Overlay,

@@ -1,5 +1,9 @@
 Set-StrictMode -Version Latest
-. $PSScriptRoot/Utils.psm1
+
+# Import required modules if not already loaded
+if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
+  Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot 'Utils.psm1')
+}
 Import-Module "$PSScriptRoot/NLP.OpenRouter.psm1" -ErrorAction SilentlyContinue
 
 function Remove-HTMLTags {

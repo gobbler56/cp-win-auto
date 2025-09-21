@@ -1,6 +1,12 @@
 Set-StrictMode -Version Latest
-. $PSScriptRoot/../../core/Contracts.psm1
-. $PSScriptRoot/../../core/Utils.psm1
+
+# Import required modules if not already loaded
+if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
+  Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot '../../../../core/Contracts.psm1')
+}
+if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
+  Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot '../../../../core/Utils.psm1')
+}
 
 function Test-Ready { param($Context) return $true }
 function Invoke-Verify { param($Context) return (New-ModuleResult -Name 'SMB' -Status 'Succeeded' -Message 'Verified (stub)') }
