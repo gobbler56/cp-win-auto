@@ -391,7 +391,16 @@ foreach (`$filePath in `$files) {
   try {
     Write-Info ("Executing system file updates via TrustedInstaller...")
     $proc = New-Win32Process -CreationFlags NoWindow -ParentProcess $ti -CommandLine $cmd
-    Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
+    if ($proc.Id) {
+      Wait-NtProcess -ProcessId $proc.Id | Out-Null
+    } elseif ($proc.ProcessId) {
+      Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
+    } elseif ($proc.PID) {
+      Wait-NtProcess -ProcessId $proc.PID | Out-Null
+    } else {
+      Write-Warn "Could not determine process ID from New-Win32Process result"
+      Start-Sleep -Seconds 2  # Give it a moment to complete
+    }
     Write-Ok "TrustedInstaller file update process completed"
     
     # Collect results from TI execution
