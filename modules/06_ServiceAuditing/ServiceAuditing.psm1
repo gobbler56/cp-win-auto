@@ -300,66 +300,93 @@ foreach(`$k in `$pairs.Keys){
   $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
 
   try {
+    # Use explicit 64-bit PowerShell path
+    $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
+    $cmd = "$exePath -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+    
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
     if (-not $proc) {
       throw "New-Win32Process returned null"
     }
     
-    # Debug: Check what properties the returned object has
-    Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
+    # The process object doesn't have ProcessId directly - it's under .Process  
     $processId = $null
+    $processObject = $null
     
-    # Try different ways to get the process ID
-    if ($proc.PSObject.Properties.Name -contains 'ProcessId') {
+    if ($proc.Process) {
+      $processObject = $proc.Process
+      if ($processObject.ProcessId) {
+        $processId = $processObject.ProcessId
+      } elseif ($processObject.Id) {
+        $processId = $processObject.Id
+      }
+    } elseif ($proc.ProcessId) {
       $processId = $proc.ProcessId
-    } elseif ($proc.PSObject.Properties.Name -contains 'Id') {
-      $processId = $proc.Id
-    } elseif ($proc.PSObject.Properties.Name -contains 'Process') {
-      $processId = $proc.Process.ProcessId
+      $processObject = $proc
+    } elseif ($proc.Id) {
+      $processId = $proc.Id  
+      $processObject = $proc
     } else {
-      # List all properties for debugging
-      $props = ($proc | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', '
-      throw "Cannot find ProcessId property. Available properties: $props"
+      Write-Warn "Cannot determine process ID, will try waiting on process object directly"
     }
     
-    if (-not $processId) {
-      throw "Could not determine process ID from returned object"
+    if ($processId) {
+      Write-Info ("Created TI child process: PID {0}" -f $processId)
+    } else {
+      Write-Info "Created TI child process (PID unknown, will wait on process object)"
     }
     
-    Write-Info ("Created TI child process: PID {0}" -f $processId)
-    
-    # Wait for the process to complete - try multiple methods
+    # Wait for the process to complete using multiple fallback methods
     $waitResult = $null
+    $exitCode = 0
+    
     try {
-      # Try NtObjectManager's Wait-NtProcess first
-      $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
-    } catch {
-      Write-Info ("Wait-NtProcess failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
-      try {
-        # Fall back to standard Wait-Process
-        $process = Get-Process -Id $processId -ErrorAction Stop
-        $process.WaitForExit()
-        $waitResult = @{ ExitCode = $process.ExitCode }
-      } catch {
-        Write-Info ("Wait-Process also failed, using Start-Sleep polling: {0}" -f $_.Exception.Message)
-        # Final fallback - poll until process is gone
-        $timeout = 30 # 30 second timeout
-        $elapsed = 0
-        while ($elapsed -lt $timeout) {
-          try {
-            $proc = Get-Process -Id $processId -ErrorAction Stop
-            Start-Sleep -Milliseconds 500
-            $elapsed += 0.5
-          } catch {
-            # Process is gone
-            break
-          }
+      # Method 1: Try waiting on the process object directly (most reliable)
+      if ($processObject -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
+        $waitResult = $processObject | Wait-NtProcess -ErrorAction Stop
+        if ($waitResult -and $waitResult.ExitCode) {
+          $exitCode = $waitResult.ExitCode
         }
-        $waitResult = @{ ExitCode = 0 }
+      } elseif ($processId -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
+        $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop  
+        if ($waitResult -and $waitResult.ExitCode) {
+          $exitCode = $waitResult.ExitCode
+        }
+      } else {
+        throw "Wait-NtProcess not available"
+      }
+    } catch {
+      Write-Info ("NtObjectManager wait failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
+      try {
+        if ($processId) {
+          $process = Get-Process -Id $processId -ErrorAction Stop
+          $process.WaitForExit()
+          $exitCode = $process.ExitCode
+        } else {
+          throw "No process ID available"
+        }
+      } catch {
+        Write-Info ("Wait-Process failed, using polling fallback: {0}" -f $_.Exception.Message)
+        if ($processId) {
+          $timeout = 30
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+            try {
+              Get-Process -Id $processId -ErrorAction Stop | Out-Null
+              Start-Sleep -Milliseconds 500
+              $elapsed += 0.5
+            } catch {
+              break
+            }
+          }
+        } else {
+          Start-Sleep -Seconds 10
+        }
       }
     }
     
-    Write-Ok "TI registry apply complete"
+    Write-Ok ("TI registry apply complete (exit code: {0})" -f $exitCode)
   } catch {
     Write-Warn ("TI spawn failed: {0}" -f $_.Exception.Message)
   }

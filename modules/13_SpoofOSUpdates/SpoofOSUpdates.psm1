@@ -398,7 +398,14 @@ foreach (`$filePath in `$files) {
 "@
 
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
-  $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+  
+  # Create temp file for capturing TI child output
+  $tempLog = Join-Path $env:TEMP ("TI_Output_{0:yyyyMMdd_HHmmss}_{1}.txt" -f (Get-Date), (Get-Random))
+  
+  $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
+  
+  $cmd = "$exePath -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc *> `"$tempLog`""
 
   Write-Info "Executing TrustedInstaller child process..."
   try {
@@ -418,41 +425,104 @@ foreach (`$filePath in `$files) {
     }
     
     Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
-    $processId = $proc.ProcessId
-    Write-Info ("Created TI child process: PID {0}" -f $processId)
     
-    # Wait for completion using fallback approach
+    # The process object doesn't have ProcessId directly - it's under .Process
+    $processId = $null
+    $processObject = $null
+    
+    # Try different ways to get the process ID
+    if ($proc.Process) {
+      $processObject = $proc.Process
+      if ($processObject.ProcessId) {
+        $processId = $processObject.ProcessId
+      } elseif ($processObject.Id) {
+        $processId = $processObject.Id
+      }
+    } elseif ($proc.ProcessId) {
+      $processId = $proc.ProcessId
+      $processObject = $proc
+    } elseif ($proc.Id) {
+      $processId = $proc.Id
+      $processObject = $proc
+    } else {
+      Write-Warn "Cannot determine process ID, will try waiting on process object directly"
+    }
+    
+    if ($processId) {
+      Write-Info ("Created TI child process: PID {0}" -f $processId)
+    } else {
+      Write-Info "Created TI child process (PID unknown, will wait on process object)"
+    }
+    
+    # Wait for the process to complete using multiple fallback methods
     $waitResult = $null
+    $exitCode = 0
+    
     try {
-      $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
-    } catch {
-      Write-Info ("Wait-NtProcess failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
-      try {
-        $process = Get-Process -Id $processId -ErrorAction Stop
-        $process.WaitForExit()
-        $waitResult = @{ ExitCode = $process.ExitCode }
-      } catch {
-        Write-Info ("Wait-Process also failed, using Start-Sleep polling: {0}" -f $_.Exception.Message)
-        $timeout = 30
-        $elapsed = 0
-        while ($elapsed -lt $timeout) {
-          try {
-            $proc = Get-Process -Id $processId -ErrorAction Stop
-            Start-Sleep -Milliseconds 500
-            $elapsed += 0.5
-          } catch {
-            break
-          }
+      # Method 1: Try waiting on the process object directly (most reliable)
+      if ($processObject -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
+        Write-Info "Waiting on TI process using process object..."
+        $waitResult = $processObject | Wait-NtProcess -ErrorAction Stop
+        if ($waitResult -and $waitResult.ExitCode) {
+          $exitCode = $waitResult.ExitCode
         }
-        $waitResult = @{ ExitCode = 0 }
+      } elseif ($processId -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
+        Write-Info "Waiting on TI process using PID..."
+        $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
+        if ($waitResult -and $waitResult.ExitCode) {
+          $exitCode = $waitResult.ExitCode
+        }
+      } else {
+        throw "Wait-NtProcess not available"
+      }
+    } catch {
+      Write-Info ("NtObjectManager wait failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
+      try {
+        if ($processId) {
+          # Fall back to standard Wait-Process with PID
+          $process = Get-Process -Id $processId -ErrorAction Stop
+          $process.WaitForExit()
+          $exitCode = $process.ExitCode
+        } else {
+          throw "No process ID available for Wait-Process"
+        }
+      } catch {
+        Write-Info ("Wait-Process failed, using polling fallback: {0}" -f $_.Exception.Message)
+        # Final fallback - poll until process is gone (if we have a PID)
+        if ($processId) {
+          $timeout = 30
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+            try {
+              Get-Process -Id $processId -ErrorAction Stop | Out-Null
+              Start-Sleep -Milliseconds 500
+              $elapsed += 0.5
+            } catch {
+              # Process is gone
+              break
+            }
+          }
+        } else {
+          # No PID available, just wait a fixed time
+          Write-Info "No PID available, waiting fixed time..."
+          Start-Sleep -Seconds 10
+        }
       }
     }
     
-    $exitCode = if ($waitResult -and $waitResult.ExitCode) { $waitResult.ExitCode } else { 0 }
     Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $exitCode)
     
-    # We can't easily capture stdout from New-Win32Process, so we need to fall back 
-    # to using a temp file or a different approach. For now, let's verify files directly.
+    # Read the temp log file to get detailed results
+    $tiOutput = ""
+    if (Test-Path $tempLog) {
+      try {
+        $tiOutput = Get-Content $tempLog -Raw -ErrorAction SilentlyContinue
+        Write-Info ("TI child output: {0}" -f $tiOutput.Substring(0, [Math]::Min(500, $tiOutput.Length)))
+        Remove-Item $tempLog -Force -ErrorAction SilentlyContinue
+      } catch {
+        Write-Warn ("Could not read TI output log: {0}" -f $_.Exception.Message)
+      }
+    }
     
     # Collect results by verifying each file
     $results = @()
