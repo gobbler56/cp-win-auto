@@ -11,6 +11,7 @@
     "ProhibitedFiles",
     "UnwantedSoftware",
     "MalwarePersistence",
+    "SpoofOSUpdates",
     "UncategorizedOS"
   ]
 }

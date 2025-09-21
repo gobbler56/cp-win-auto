@@ -21,7 +21,8 @@
     "ApplicationSecurity/DNS": true,
     "ApplicationSecurity/PHP": true,
     "ApplicationSecurity/MySQL": true,
-    "ApplicationSecurity/FileZilla": true
+    "ApplicationSecurity/FileZilla": true,
+    "SpoofOSUpdates": true
   },
   "args": {
     "MinPasswordLength": 12,
