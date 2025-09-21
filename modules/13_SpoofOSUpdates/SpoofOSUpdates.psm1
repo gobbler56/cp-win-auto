@@ -338,17 +338,31 @@ function TI-UpdateSystemFiles {
   $filesArray = ($FilePaths | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
   $displayVersion = $Script:DisplayVersionHigh
   
-  # Escape the C# code for embedding in the payload
-  $escapedCS = $Script:VersionResourceEditorCS.Replace("'", "''").Replace("`n", "`n").Replace("`r", "")
+  # Create accessible temp file for output capture (C:\Windows\Temp should be writable by TrustedInstaller)
+  $tempLog = "C:\Windows\Temp\TI_SpoofOS_$((Get-Date).ToString('yyyyMMdd_HHmmss'))_$(Get-Random).txt"
+  Write-Info ("TI child will log to: $tempLog")
   
+  # Escape the C# code for embedding in the payload
+  $escapedCS = $Script:VersionResourceEditorCS.Replace("'", "''")
+  
+  # Build the payload with output redirection and better error handling
   $payload = @"
-Import-Module NtObjectManager -Force -ErrorAction SilentlyContinue
+# TrustedInstaller child process payload
+Write-Output "TI-CHILD: Starting at `$(Get-Date)"
+
+try {
+  Import-Module NtObjectManager -Force -ErrorAction SilentlyContinue
+} catch {
+  Write-Output "TI-CHILD: Failed to import NtObjectManager: `$(`$_.Exception.Message)"
+}
 
 # Compile the version resource editor in this TI child process
+Write-Output "TI-CHILD: Compiling version resource editor..."
 try {
   Add-Type -TypeDefinition '$escapedCS' -Language CSharp -IgnoreWarnings -ErrorAction Stop
+  Write-Output "TI-CHILD: C# compilation successful"
 } catch {
-  Write-Output "COMPILE_ERROR - Failed to compile version resource editor: `$(`$_.Exception.Message)"
+  Write-Output "TI-CHILD: COMPILE_ERROR - Failed to compile version resource editor: `$(`$_.Exception.Message)"
   exit 1
 }
 
@@ -372,65 +386,57 @@ function Get-FourPartVersion {
 `$fixedParts = Get-FourPartVersion -Version `$displayVersion
 `$maj, `$min, `$bld, `$rev = `$fixedParts
 
+Write-Output "TI-CHILD: Processing `$(`$files.Count) files..."
 foreach (`$filePath in `$files) {
+  Write-Output "TI-CHILD: Processing `$filePath"
   try {
     `$backup = "`$filePath.bak"
     if (-not (Test-Path -LiteralPath `$backup)) {
       Copy-Item -LiteralPath `$filePath -Destination `$backup -ErrorAction SilentlyContinue
+      Write-Output "TI-CHILD: Created backup for `$filePath"
     }
     
     `$item = Get-Item -LiteralPath `$filePath -ErrorAction SilentlyContinue
     if (`$item -and `$item.IsReadOnly) {
       `$item.IsReadOnly = `$false
+      Write-Output "TI-CHILD: Cleared ReadOnly flag for `$filePath"
     }
     
+    Write-Output "TI-CHILD: Calling UpdateVersion for `$filePath"
     [OSVersionResourceEditor]::UpdateVersion(
       `$filePath,
       `$displayVersion,
       [uint16]`$maj, [uint16]`$min, [uint16]`$bld, [uint16]`$rev
     )
     
-    Write-Output "SUCCESS:`$filePath"
+    Write-Output "TI-CHILD: SUCCESS: `$filePath"
   } catch {
-    Write-Output "ERROR:`$filePath - `$(`$_.Exception.Message)"
+    Write-Output "TI-CHILD: ERROR: `$filePath - `$(`$_.Exception.Message)"
   }
 }
+
+Write-Output "TI-CHILD: Completed at `$(Get-Date)"
 "@
 
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
   
-  # Create temp file for capturing TI child output
-  $tempLog = Join-Path $env:TEMP ("TI_Output_{0:yyyyMMdd_HHmmss}_{1}.txt" -f (Get-Date), (Get-Random))
-  
   $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
   
-  $cmd = "$exePath -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc *> `"$tempLog`""
+  # Use simple redirection to capture all output
+  $cmd = "`"$exePath`" -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc > `"$tempLog`" 2>&1"
 
-  Write-Info "Executing TrustedInstaller child process..."
+  Write-Info ("Executing TrustedInstaller child process with command length: {0}" -f $cmd.Length)
   try {
-    # Use Start-Process to capture output
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-
-    # Create the process under TrustedInstaller token using NtObjectManager
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
     if (-not $proc) {
       throw "New-Win32Process returned null"
     }
     
-    Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
-    
-    # The process object doesn't have ProcessId directly - it's under .Process
+    # Get process ID from the returned object
     $processId = $null
     $processObject = $null
     
-    # Try different ways to get the process ID
     if ($proc.Process) {
       $processObject = $proc.Process
       if ($processObject.ProcessId) {
@@ -445,14 +451,11 @@ foreach (`$filePath in `$files) {
       $processId = $proc.Id
       $processObject = $proc
     } else {
-      Write-Warn "Cannot determine process ID, will try waiting on process object directly"
+      Write-Info "Cannot determine process ID, will wait on process object directly"
+      $processObject = $proc
     }
     
-    if ($processId) {
-      Write-Info ("Created TI child process: PID {0}" -f $processId)
-    } else {
-      Write-Info "Created TI child process (PID unknown, will wait on process object)"
-    }
+    Write-Info ("Created TI child process: PID {0}" -f ($processId -or "unknown"))
     
     # Wait for the process to complete using multiple fallback methods
     $waitResult = $null
@@ -461,7 +464,7 @@ foreach (`$filePath in `$files) {
     try {
       # Method 1: Try waiting on the process object directly (most reliable)
       if ($processObject -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
-        Write-Info "Waiting on TI process using process object..."
+        Write-Info "Waiting on TI process using NtObjectManager..."
         $waitResult = $processObject | Wait-NtProcess -ErrorAction Stop
         if ($waitResult -and $waitResult.ExitCode) {
           $exitCode = $waitResult.ExitCode
@@ -512,16 +515,22 @@ foreach (`$filePath in `$files) {
     
     Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $exitCode)
     
-    # Read the temp log file to get detailed results
+    # Read and process the temp log file
     $tiOutput = ""
     if (Test-Path $tempLog) {
       try {
         $tiOutput = Get-Content $tempLog -Raw -ErrorAction SilentlyContinue
-        Write-Info ("TI child output: {0}" -f $tiOutput.Substring(0, [Math]::Min(500, $tiOutput.Length)))
+        Write-Info ("TI child output ({0} chars):" -f $tiOutput.Length)
+        # Show first 1000 chars of output for debugging
+        $preview = $tiOutput.Substring(0, [Math]::Min(1000, $tiOutput.Length))
+        $preview -split "`n" | ForEach-Object { Write-Info "  $_" }
+        
         Remove-Item $tempLog -Force -ErrorAction SilentlyContinue
       } catch {
         Write-Warn ("Could not read TI output log: {0}" -f $_.Exception.Message)
       }
+    } else {
+      Write-Warn ("TI temp log file not found: $tempLog")
     }
     
     # Collect results by verifying each file
