@@ -300,7 +300,33 @@ foreach(`$k in `$pairs.Keys){
 
   try {
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
-    Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
+    if (-not $proc) {
+      throw "New-Win32Process returned null"
+    }
+    
+    # Debug: Check what properties the returned object has
+    Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
+    $processId = $null
+    
+    # Try different ways to get the process ID
+    if ($proc.PSObject.Properties.Name -contains 'ProcessId') {
+      $processId = $proc.ProcessId
+    } elseif ($proc.PSObject.Properties.Name -contains 'Id') {
+      $processId = $proc.Id
+    } elseif ($proc.PSObject.Properties.Name -contains 'Process') {
+      $processId = $proc.Process.ProcessId
+    } else {
+      # List all properties for debugging
+      $props = ($proc | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', '
+      throw "Cannot find ProcessId property. Available properties: $props"
+    }
+    
+    if (-not $processId) {
+      throw "Could not determine process ID from returned object"
+    }
+    
+    Write-Info ("Created TI child process: PID {0}" -f $processId)
+    Wait-NtProcess -ProcessId $processId | Out-Null
     Write-Ok "TI registry apply complete"
   } catch {
     Write-Warn ("TI spawn failed: {0}" -f $_.Exception.Message)

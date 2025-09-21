@@ -390,13 +390,34 @@ foreach (`$filePath in `$files) {
   Write-Info "Executing TrustedInstaller child process..."
   try {
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
-    if ($proc -and $proc.ProcessId) {
-      Write-Info ("Created TI child process: PID {0}" -f $proc.ProcessId)
-      $waitResult = Wait-NtProcess -ProcessId $proc.ProcessId
-      Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $waitResult.ExitCode)
-    } else {
-      throw "New-Win32Process returned invalid process object"
+    if (-not $proc) {
+      throw "New-Win32Process returned null"
     }
+    
+    # Debug: Check what properties the returned object has
+    Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
+    $processId = $null
+    
+    # Try different ways to get the process ID
+    if ($proc.PSObject.Properties.Name -contains 'ProcessId') {
+      $processId = $proc.ProcessId
+    } elseif ($proc.PSObject.Properties.Name -contains 'Id') {
+      $processId = $proc.Id
+    } elseif ($proc.PSObject.Properties.Name -contains 'Process') {
+      $processId = $proc.Process.ProcessId
+    } else {
+      # List all properties for debugging
+      $props = ($proc | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', '
+      throw "Cannot find ProcessId property. Available properties: $props"
+    }
+    
+    if (-not $processId) {
+      throw "Could not determine process ID from returned object"
+    }
+    
+    Write-Info ("Created TI child process: PID {0}" -f $processId)
+    $waitResult = Wait-NtProcess -ProcessId $processId
+    Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $waitResult.ExitCode)
     
     # Collect results from TI execution
     $results = @()
