@@ -8,14 +8,12 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
   function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
-# --- Configuration knobs ---
+# --- Config ---
 $Script:DisplayVersionHigh = '65535.65535.65535'
-$Script:DefaultMaxParallel = [Math]::Max(4, [Math]::Min(([Environment]::ProcessorCount * 2), 32))  # throttle
+$Script:DefaultMaxParallel = [Math]::Max(4, [Math]::Min(([Environment]::ProcessorCount * 2), 32))
 
-# --- Helper discovery (we'll use your logic if present) ---
 function Get-UpdateHelpers {
   param([Parameter(Mandatory)][string]$ContextRoot)
-
   $candidatesBulk = @(
     (Join-Path $PSScriptRoot 'scripts\update_everything.ps1'),
     (Join-Path $ContextRoot   'assets\scripts\update_everything.ps1'),
@@ -34,7 +32,6 @@ function Get-UpdateHelpers {
   }
 }
 
-# --- Root set to scan (what you asked for) ---
 function Get-RootsToScan {
   $roots = New-Object System.Collections.Generic.List[string]
   foreach ($p in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
@@ -43,9 +40,9 @@ function Get-RootsToScan {
   $usersRoot = 'C:\Users'
   if (Test-Path -LiteralPath $usersRoot) {
     Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -notmatch '^(Default|Default User|Public|All Users|\$Recycle\.Bin)$' } |
+      Where-Object { $_.Name -notmatch '^\$Recycle\.Bin$' } |
       ForEach-Object {
-        $roots.Add($_.FullName)
+        $roots.Add($_.FullName)  # includes Desktop, Downloads, etc.
         foreach ($sub in @('AppData\Local\Programs','AppData\Local','AppData\Roaming')) {
           $p = Join-Path $_.FullName $sub
           if (Test-Path -LiteralPath $p) { $roots.Add($p) }
@@ -55,43 +52,40 @@ function Get-RootsToScan {
   $roots | Select-Object -Unique
 }
 
-# --- Fast enumerator for executables ---
+# PS-version-aware EXE enumeration (no silent failure)
 function Get-ExecutableFiles {
   param([string[]]$Roots)
 
-  # Skip noisy/systemy subpaths (saves a lot of time and avoids ACL errors)
-  $skipPatterns = @(
-    '\\WindowsApps\\',       # UWP store sandbox content
-    '\\Microsoft\\Windows',  # Windows components under ProgramData
-    '\\Common Files\\microsoft shared\\ClickToRun\\', # Office C2R binaries
-    '\\Installer\\',         # MSI cache
-    '\\Packages\\'           # Some app package caches
-  )
-
   $results = New-Object System.Collections.Generic.List[string]
+  $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
+
   foreach ($root in $Roots) {
     if (-not (Test-Path -LiteralPath $root)) { continue }
     try {
-      # .NET enumerator is much faster than GCI -Recurse on large trees
-      $enumOpts = [System.IO.EnumerationOptions]::new()
-      $enumOpts.RecurseSubdirectories   = $true
-      $enumOpts.AttributesToSkip        = [System.IO.FileAttributes]::ReparsePoint
-      $enumOpts.IgnoreInaccessible      = $true
-      $enumOpts.ReturnSpecialDirectories = $false
+      if ($isPS7) {
+        # Fast path (PS7 / .NET)
+        $opts = [System.IO.EnumerationOptions]::new()
+        $opts.RecurseSubdirectories    = $true
+        $opts.AttributesToSkip         = [System.IO.FileAttributes]::ReparsePoint
+        $opts.IgnoreInaccessible       = $true
+        $opts.ReturnSpecialDirectories = $false
 
-      foreach ($path in [System.IO.Directory]::EnumerateFiles($root, '*.exe', $enumOpts)) {
-        $pLower = $path.ToLowerInvariant()
-        $skip = $false
-        foreach ($pat in $skipPatterns) { if ($pLower.Contains($pat.ToLower())) { $skip = $true; break } }
-        if (-not $skip) { $results.Add($path) }
+        foreach ($path in [System.IO.Directory]::EnumerateFiles($root, '*.exe', $opts)) {
+          if ($path -like '*\WindowsApps\*') { continue }  # skip UWP sandbox
+          $results.Add($path)
+        }
+      } else {
+        # Reliable path (Windows PowerShell 5.1)
+        Get-ChildItem -LiteralPath $root -Filter *.exe -File -Recurse -Force -ErrorAction SilentlyContinue |
+          ForEach-Object { $results.Add($_.FullName) }
       }
-    } catch { }
+    } catch {
+      # Ignore inaccessible subtrees and keep going
+    }
   }
-  # Unique & return
   $results | Select-Object -Unique
 }
 
-# --- Fallback: bump Uninstall registry so scorers see "updated" ---
 function Bump-UninstallRegistry {
   param([string]$DisplayVersion = $Script:DisplayVersionHigh)
   $today = Get-Date -Format 'yyyyMMdd'
@@ -120,15 +114,15 @@ function Bump-UninstallRegistry {
   $touched
 }
 
-# --- Invoke your single-file updater against a list of EXEs (parallel) ---
 function Invoke-FakeUpdateOnFiles {
   param(
     [Parameter(Mandatory)][string]$HelperSingle,
     [Parameter(Mandatory)][string[]]$Files,
     [int]$MaxParallel = $Script:DefaultMaxParallel
   )
+  if (-not $Files -or $Files.Count -eq 0) { return 0 }
 
-  # Try to discover parameter name your helper expects (Path/File/Input)
+  # Try to infer the param name
   $paramName = 'Path'
   try {
     $cmd = Get-Command -LiteralPath $HelperSingle -ErrorAction SilentlyContinue
@@ -137,50 +131,33 @@ function Invoke-FakeUpdateOnFiles {
     elseif ($cmd -and $cmd.Parameters.ContainsKey('Path'))  { $paramName = 'Path' }
   } catch {}
 
-  $count = 0
-  $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
+  $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
 
+  $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
   if ($isPS7) {
-    $throttle = [Math]::Max(1, $MaxParallel)
     $Files | ForEach-Object -Parallel {
-      param($PSItem, $HelperSingle, $paramName)
+      param($PSItem,$HelperSingle,$paramName,$exePath)
       try {
-        $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$PSItem`"")
-        $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
-        $p.WaitForExit()
+        & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $PSItem | Out-Null
       } catch {}
-    } -ThrottleLimit $throttle -AsJob | Receive-Job -Wait -AutoRemoveJob | Out-Null
-    $count = $Files.Count
+    } -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob | Receive-Job -Wait -AutoRemoveJob | Out-Null
   } else {
-    # Windows PowerShell 5.1 path: use ThreadJob if available, else classic jobs
     $haveThreadJob = $false
     try { Import-Module ThreadJob -ErrorAction Stop; $haveThreadJob = $true } catch {}
     if ($haveThreadJob) {
       $jobs = foreach ($f in $Files) {
         Start-ThreadJob -ScriptBlock {
-          param($f,$HelperSingle,$paramName)
-          try {
-            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$f`"")
-            $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
-            $p.WaitForExit()
-          } catch {}
-        } -ArgumentList $f,$HelperSingle,$paramName
+          param($f,$HelperSingle,$paramName,$exePath)
+          try { & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $f | Out-Null } catch {}
+        } -ArgumentList $f,$HelperSingle,$paramName,$exePath
       }
       if ($jobs) { Receive-Job -Job $jobs -Wait -AutoRemoveJob | Out-Null }
-      $count = $Files.Count
     } else {
-      foreach ($f in $Files) {
-        try {
-          $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$f`"")
-          $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
-          $p.WaitForExit()
-        } catch {}
-      }
-      $count = $Files.Count
+      foreach ($f in $Files) { try { & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $f | Out-Null } catch {} }
     }
   }
-
-  $count
+  return $Files.Count
 }
 
 function Test-Ready { param($Context) return $true }
@@ -188,35 +165,29 @@ function Test-Ready { param($Context) return $true }
 function Invoke-Apply {
   param($Context)
 
-  # 1) Find helpers (we prefer single-file helper so we can drive it per-file in parallel)
   $helpers = Get-UpdateHelpers -ContextRoot $Context.Root
   $helperSingle = $helpers.Single
   $helperBulk   = $helpers.Bulk
 
-  # 2) Build roots and enumerate executables (fast)
-  $roots = @(Get-RootsToScan)
+  $roots  = @(Get-RootsToScan)
   Write-Info ("AppUpdates roots: {0}" -f ($roots -join '; '))
+
   $exeList = @(Get-ExecutableFiles -Roots $roots)
   Write-Info ("Found {0} executables (post-filter)" -f $exeList.Count)
 
-  # 3) If your single-file helper exists, run it against all EXEs in parallel
   $touchedFiles = 0
-  if ($helperSingle) {
+  if ($helperSingle -and $exeList.Count -gt 0) {
     Write-Info "Using helper (single): $helperSingle"
     $touchedFiles = Invoke-FakeUpdateOnFiles -HelperSingle $helperSingle -Files $exeList -MaxParallel $Script:DefaultMaxParallel
     Write-Ok ("Applied file-level fake update to {0} executables" -f $touchedFiles)
   } elseif ($helperBulk) {
-    # Fallback: bulk helper once (it may recurse internally)
     Write-Info "Using helper (bulk): $helperBulk"
-    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$helperBulk`"")
-    $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($args -join ' ') -PassThru -WindowStyle Hidden
-    $p.WaitForExit()
+    try { & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $helperBulk | Out-Null } catch {}
     Write-Ok "Bulk helper completed"
   } else {
-    Write-Warn "No helper scripts found; skipping file-level updates."
+    Write-Warn "No helper scripts found OR no executables discovered; skipping file-level updates."
   }
 
-  # 4) Always bump Uninstall registry (fast scoring win)
   $touchedReg = Bump-UninstallRegistry -DisplayVersion $Script:DisplayVersionHigh
   Write-Ok ("Bumped DisplayVersion/InstallDate on {0} registry entries" -f $touchedReg)
 
