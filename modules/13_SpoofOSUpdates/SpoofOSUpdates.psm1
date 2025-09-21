@@ -386,7 +386,7 @@ foreach (`$filePath in `$files) {
   $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
 
   try {
-    $proc = New-Win32Process powershell.exe -CreationFlags NoWindow -ParentProcess $ti -CommandLine $cmd
+    $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
     Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
     Write-Ok "TrustedInstaller file update process completed"
     
