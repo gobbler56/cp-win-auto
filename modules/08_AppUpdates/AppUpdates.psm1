@@ -272,7 +272,8 @@ function Invoke-FakeUpdateOnFiles {
     Write-Warn $msg
   }
 
-  return ($results | Where-Object { $_.Success }).Count
+  $successes = @($results | Where-Object { $_.Success })
+  return $successes.Count
 }
 
 function Test-Ready { param($Context) return $true }
