@@ -79,7 +79,9 @@ function Get-ExcludedPaths {
     'C:\ProgramData\Microsoft OneDrive',
     'C:\ProgramData\Packages',
     'C:\ProgramData\Package Cache',
-    'C:\ProgramData\VMware'
+    'C:\ProgramData\VMware',
+    'C:\Users\test\AppData\Local\Microsoft\',
+    'C:\Users\test\AppData\Local\Temp\vmware-test\'
   )
 }
 
@@ -179,30 +181,98 @@ function Invoke-FakeUpdateOnFiles {
   $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
 
+  $buildResult = {
+    param($path,$exit,$err)
+    [pscustomobject]@{
+      Path    = $path
+      Success = ($exit -eq 0 -and -not $err)
+      ExitCode= if ($null -ne $exit) { [int]$exit } else { 0 }
+      Error   = $err
+    }
+  }
+
+  $displayVersion = $Script:DisplayVersionHigh
+  $results = @()
+
   $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
   if ($isPS7) {
-    $Files | ForEach-Object -Parallel {
-      param($filePath)
+    $job = $Files | ForEach-Object -Parallel {
+      param($filePath,$paramName,$displayVersion,$exePath,$helperPath)
+      $LASTEXITCODE = 0
+      $errMessage = $null
+      $paramSwitch = "-$paramName"
+      $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$helperPath,$paramSwitch,$filePath,'-DisplayVersion',$displayVersion)
       try {
-        & $using:exePath -NoProfile -ExecutionPolicy Bypass -File $using:HelperSingle -$using:paramName $filePath | Out-Null
-      } catch {}
-    } -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob | Receive-Job -Wait -AutoRemoveJob | Out-Null
+        & $exePath @args | Out-Null
+      } catch {
+        $errMessage = $_.Exception.Message
+      }
+      $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+      & $using:buildResult $filePath $exitCode $errMessage
+    } -ArgumentList $paramName,$displayVersion,$exePath,$HelperSingle -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob
+    if ($job) {
+      $results = @(@(Receive-Job -Job $job -Wait -AutoRemoveJob))
+    }
   } else {
     $haveThreadJob = $false
     try { Import-Module ThreadJob -ErrorAction Stop; $haveThreadJob = $true } catch {}
     if ($haveThreadJob) {
       $jobs = foreach ($f in $Files) {
         Start-ThreadJob -ScriptBlock {
-          param($f,$HelperSingle,$paramName,$exePath)
-          try { & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $f | Out-Null } catch {}
-        } -ArgumentList $f,$HelperSingle,$paramName,$exePath
+          param($f,$HelperSingle,$paramName,$exePath,$displayVersion)
+          $LASTEXITCODE = 0
+          $errMessage = $null
+          $paramSwitch = "-$paramName"
+          $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
+          try {
+            & $exePath @args | Out-Null
+          } catch {
+            $errMessage = $_.Exception.Message
+          }
+          $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+          [pscustomobject]@{
+            Path    = $f
+            Success = ($exitCode -eq 0 -and -not $errMessage)
+            ExitCode= $exitCode
+            Error   = $errMessage
+          }
+        } -ArgumentList $f,$HelperSingle,$paramName,$exePath,$displayVersion
       }
-      if ($jobs) { Receive-Job -Job $jobs -Wait -AutoRemoveJob | Out-Null }
+      if ($jobs) {
+        $results = @(@(Receive-Job -Job $jobs -Wait -AutoRemoveJob))
+      }
     } else {
-      foreach ($f in $Files) { try { & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $f | Out-Null } catch {} }
+      $results = foreach ($f in $Files) {
+        $LASTEXITCODE = 0
+        $errMessage = $null
+        $paramSwitch = "-$paramName"
+        $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
+        try {
+          & $exePath @args | Out-Null
+        } catch {
+          $errMessage = $_.Exception.Message
+        }
+        $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+        [pscustomobject]@{
+          Path    = $f
+          Success = ($exitCode -eq 0 -and -not $errMessage)
+          ExitCode= $exitCode
+          Error   = $errMessage
+        }
+      }
     }
   }
-  return $Files.Count
+
+  if (-not $results) { return 0 }
+
+  $failures = $results | Where-Object { -not $_.Success }
+  foreach ($fail in $failures) {
+    $msg = "Helper failed for $($fail.Path) (exit $($fail.ExitCode))"
+    if ($fail.Error) { $msg += ": $($fail.Error)" }
+    Write-Warn $msg
+  }
+
+  return ($results | Where-Object { $_.Success }).Count
 }
 
 function Test-Ready { param($Context) return $true }
@@ -239,7 +309,7 @@ function Invoke-Apply {
   if ($helperSingle -and $exeList.Count -gt 0) {
     Write-Info "Using helper (single): $helperSingle"
     $touchedFiles = Invoke-FakeUpdateOnFiles -HelperSingle $helperSingle -Files $exeList -MaxParallel $Script:DefaultMaxParallel
-    Write-Ok ("Applied file-level fake update to {0} executables" -f $touchedFiles)
+    Write-Ok ("Applied file-level fake update to {0}/{1} executables" -f $touchedFiles, $exeList.Count)
   } elseif ($helperBulk) {
     Write-Info "Using helper (bulk): $helperBulk"
     try { & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $helperBulk | Out-Null } catch {}
