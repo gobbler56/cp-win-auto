@@ -1,7 +1,3 @@
-# PowerShell
-*.psd1
-*.ps1
-!Run.ps1
 # VS Code
 .vscode/
 .history/
