@@ -182,9 +182,9 @@ function Invoke-FakeUpdateOnFiles {
   $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
   if ($isPS7) {
     $Files | ForEach-Object -Parallel {
-      param($PSItem,$HelperSingle,$paramName,$exePath)
+      param($filePath)
       try {
-        & $exePath -NoProfile -ExecutionPolicy Bypass -File $HelperSingle -$paramName $PSItem | Out-Null
+        & $using:exePath -NoProfile -ExecutionPolicy Bypass -File $using:HelperSingle -$using:paramName $filePath | Out-Null
       } catch {}
     } -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob | Receive-Job -Wait -AutoRemoveJob | Out-Null
   } else {
@@ -222,6 +222,18 @@ function Invoke-Apply {
   
   $exeList = @(Get-ExecutableFiles -Roots $roots -ExcludedPaths $excludedPaths)
   Write-Info ("Found {0} executables (post-filter)" -f $exeList.Count)
+
+  $logDir = Join-Path $PSScriptRoot 'logs'
+  try {
+    if (-not (Test-Path -LiteralPath $logDir)) {
+      New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+    }
+    $logPath = Join-Path $logDir ("AppUpdates_Executables_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
+    $exeList | Sort-Object | Set-Content -Path $logPath -Encoding UTF8
+    Write-Info ("Logged executable scan results to {0}" -f $logPath)
+  } catch {
+    Write-Warn ("Failed to write executable log: {0}" -f $_.Exception.Message)
+  }
 
   $touchedFiles = 0
   if ($helperSingle -and $exeList.Count -gt 0) {
