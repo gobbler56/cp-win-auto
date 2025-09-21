@@ -317,9 +317,9 @@ function Update-SystemFileVersions {
       }
       
       if ($result.Success) {
-        Write-Ok ("Updated $filePath: $($result.OriginalVersion) -> $($result.NewVersion)")
+        Write-Ok ("Updated ${filePath}: $($result.OriginalVersion) -> $($result.NewVersion)")
       } else {
-        Write-Warn ("Version update may have failed for $filePath")
+        Write-Warn ("Version update may have failed for ${filePath}")
       }
       
     } catch {
@@ -508,13 +508,13 @@ function Invoke-Apply {
   if ($failed.Count -gt 0) {
     Write-Warn ("Failed to update {0} files:" -f $failed.Count)
     foreach ($fail in $failed) {
-      Write-Warn ("  $($fail.Path): $($fail.Error)")
+      Write-Warn ("  $($fail.Path) - $($fail.Error)")
     }
   }
   
   # Show some successful updates
   foreach ($success in ($successful | Select-Object -First 5)) {
-    Write-Ok ("  $($success.Path): $($success.OriginalVersion) -> $($success.NewVersion)")
+    Write-Ok ("  $($success.Path) - $($success.OriginalVersion) -> $($success.NewVersion)")
   }
   
   $message = "Updated $($successful.Count)/$($results.Count) system files to version $Script:DisplayVersionHigh"
