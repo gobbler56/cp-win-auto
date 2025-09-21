@@ -340,10 +340,8 @@ function TI-UpdateSystemFiles {
 `$files = @($filesArray)
 `$displayVersion = '$displayVersion'
 
-# Embedded C# (same as parent)
-Add-Type -TypeDefinition @'
-$Script:VersionResourceEditorCS
-'@ -Language CSharp -IgnoreWarnings
+# C# type should already be compiled in parent session
+# We'll use the OSVersionResourceEditor type that should be available
 
 function Get-FourPartVersion {
   param([string]`$Version)
@@ -436,6 +434,16 @@ function Invoke-Apply {
   param($Context)
   
   Write-Info "Starting OS version spoofing for scoring systems..."
+  
+  # Pre-compile C# version resource editor for use by both local and TrustedInstaller operations
+  Write-Info ("Pre-compiling version resource editor...")
+  try {
+    Add-Type -TypeDefinition $Script:VersionResourceEditorCS -Language CSharp -IgnoreWarnings -ErrorAction Stop
+    Write-Ok "Version resource editor compiled successfully"
+  } catch {
+    Write-Warn ("Failed to compile version resource editor: {0}" -f $_.Exception.Message)
+    return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message 'C# compilation failed'
+  }
   
   # Find all target files
   $allTargetFiles = @($Script:SystemDlls) + @($Script:SystemExes)
