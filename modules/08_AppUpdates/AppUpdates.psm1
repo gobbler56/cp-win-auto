@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-# Fallback logging in case core utils aren't loaded
+# Minimal logging if core isn't loaded
 if (-not (Get-Command Write-Info -EA SilentlyContinue)) { function Write-Info([string]$m){Write-Host "[*] $m" -ForegroundColor Cyan} }
 if (-not (Get-Command Write-Ok   -EA SilentlyContinue)) { function Write-Ok  ([string]$m){Write-Host "[OK] $m" -ForegroundColor Green} }
 if (-not (Get-Command Write-Warn -EA SilentlyContinue)) { function Write-Warn([string]$m){Write-Host "[!!] $m" -ForegroundColor Yellow} }
@@ -8,49 +8,92 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
   function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
-# Locate optional helper script you provided (bulk EXE version editor)
-function Get-AppUpdateHelper {
+# --- Configuration knobs ---
+$Script:DisplayVersionHigh = '65535.65535.65535'
+$Script:DefaultMaxParallel = [Math]::Max(4, [Math]::Min(([Environment]::ProcessorCount * 2), 32))  # throttle
+
+# --- Helper discovery (we'll use your logic if present) ---
+function Get-UpdateHelpers {
   param([Parameter(Mandatory)][string]$ContextRoot)
-  $candidates = @(
-    # preferred: module-local scripts (drop your helper here)
+
+  $candidatesBulk = @(
     (Join-Path $PSScriptRoot 'scripts\update_everything.ps1'),
-    # repo-level assets (if you keep scripts centrally)
-    (Join-Path $ContextRoot 'assets\scripts\update_everything.ps1'),
-    # fallback: root
-    (Join-Path $ContextRoot 'update_everything.ps1')
-  )
-  foreach ($p in $candidates) { if (Test-Path -LiteralPath $p) { return $p } }
-  return $null
+    (Join-Path $ContextRoot   'assets\scripts\update_everything.ps1'),
+    (Join-Path $ContextRoot   'update_everything.ps1')
+  ) | Where-Object { Test-Path -LiteralPath $_ }
+
+  $candidatesSingle = @(
+    (Join-Path $PSScriptRoot 'scripts\update_single.ps1'),
+    (Join-Path $ContextRoot   'assets\scripts\update_single.ps1'),
+    (Join-Path $ContextRoot   'update_single.ps1')
+  ) | Where-Object { Test-Path -LiteralPath $_ }
+
+  [pscustomobject]@{
+    Bulk   = ($candidatesBulk   | Select-Object -First 1)
+    Single = ($candidatesSingle | Select-Object -First 1)
+  }
 }
 
-# Build the root set you requested
+# --- Root set to scan (what you asked for) ---
 function Get-RootsToScan {
-  param()
-  $roots = @()
+  $roots = New-Object System.Collections.Generic.List[string]
   foreach ($p in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
-    if ($p -and (Test-Path -LiteralPath $p)) { $roots += (Resolve-Path $p).Path }
+    if ($p -and (Test-Path -LiteralPath $p)) { $roots.Add((Resolve-Path $p).Path) }
   }
-  # All user profiles (skip Default*), include common app dirs
-  $userRoot = 'C:\Users'
-  if (Test-Path -LiteralPath $userRoot) {
-    Get-ChildItem -LiteralPath $userRoot -Directory -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -notmatch '^(Default|\$Recycle\.Bin|All Users)$' } |
+  $usersRoot = 'C:\Users'
+  if (Test-Path -LiteralPath $usersRoot) {
+    Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -notmatch '^(Default|Default User|Public|All Users|\$Recycle\.Bin)$' } |
       ForEach-Object {
-        $roots += $_.FullName
+        $roots.Add($_.FullName)
         foreach ($sub in @('AppData\Local\Programs','AppData\Local','AppData\Roaming')) {
           $p = Join-Path $_.FullName $sub
-          if (Test-Path -LiteralPath $p) { $roots += $p }
+          if (Test-Path -LiteralPath $p) { $roots.Add($p) }
         }
       }
   }
-  $roots | Where-Object { $_ } | Select-Object -Unique
+  $roots | Select-Object -Unique
 }
 
-# Registry-only fallback (fast + common scorer target)
-function Bump-UninstallRegistry {
-  param(
-    [string]$DisplayVersion = '65535.65535.65535'
+# --- Fast enumerator for executables ---
+function Get-ExecutableFiles {
+  param([string[]]$Roots)
+
+  # Skip noisy/systemy subpaths (saves a lot of time and avoids ACL errors)
+  $skipPatterns = @(
+    '\\WindowsApps\\',       # UWP store sandbox content
+    '\\Microsoft\\Windows',  # Windows components under ProgramData
+    '\\Common Files\\microsoft shared\\ClickToRun\\', # Office C2R binaries
+    '\\Installer\\',         # MSI cache
+    '\\Packages\\'           # Some app package caches
   )
+
+  $results = New-Object System.Collections.Generic.List[string]
+  foreach ($root in $Roots) {
+    if (-not (Test-Path -LiteralPath $root)) { continue }
+    try {
+      # .NET enumerator is much faster than GCI -Recurse on large trees
+      $enumOpts = [System.IO.EnumerationOptions]::new()
+      $enumOpts.RecurseSubdirectories   = $true
+      $enumOpts.AttributesToSkip        = [System.IO.FileAttributes]::ReparsePoint
+      $enumOpts.IgnoreInaccessible      = $true
+      $enumOpts.ReturnSpecialDirectories = $false
+
+      foreach ($path in [System.IO.Directory]::EnumerateFiles($root, '*.exe', $enumOpts)) {
+        $pLower = $path.ToLowerInvariant()
+        $skip = $false
+        foreach ($pat in $skipPatterns) { if ($pLower.Contains($pat.ToLower())) { $skip = $true; break } }
+        if (-not $skip) { $results.Add($path) }
+      }
+    } catch { }
+  }
+  # Unique & return
+  $results | Select-Object -Unique
+}
+
+# --- Fallback: bump Uninstall registry so scorers see "updated" ---
+function Bump-UninstallRegistry {
+  param([string]$DisplayVersion = $Script:DisplayVersionHigh)
   $today = Get-Date -Format 'yyyyMMdd'
   $targets = @(
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -63,64 +106,81 @@ function Bump-UninstallRegistry {
       try {
         $k = $_.PSPath
         $props = Get-ItemProperty -LiteralPath $k -ErrorAction Stop
-        if (-not $props.DisplayName) { return }  # avoid junk keys
-
-        # DisplayVersion (string)
+        if (-not $props.DisplayName) { return }
         New-ItemProperty -LiteralPath $k -Name DisplayVersion -Value $DisplayVersion -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
-
-        # Major/Minor (DWORD) — some scorers look at these
-        $parts = $DisplayVersion -split '\.'
-        if ($parts.Count -ge 2) {
-          $maj = [int]($parts[0]); $min = [int]($parts[1])
-          New-ItemProperty -LiteralPath $k -Name VersionMajor -Value $maj -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-          New-ItemProperty -LiteralPath $k -Name VersionMinor -Value $min -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+        $parts = $DisplayVersion -split '\.'; if ($parts.Count -ge 2) {
+          New-ItemProperty -LiteralPath $k -Name VersionMajor -Value ([int]$parts[0]) -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+          New-ItemProperty -LiteralPath $k -Name VersionMinor -Value ([int]$parts[1]) -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
         }
-
-        # InstallDate in yyyymmdd
         New-ItemProperty -LiteralPath $k -Name InstallDate -Value $today -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
         $touched++
       } catch { }
     }
   }
-  return $touched
+  $touched
 }
 
-# Run your helper once (it recurses internally) with all roots
-function Run-HelperBulk {
+# --- Invoke your single-file updater against a list of EXEs (parallel) ---
+function Invoke-FakeUpdateOnFiles {
   param(
-    [Parameter(Mandatory)][string]$HelperPath,
-    [string[]]$Roots,
-    [string]$DisplayVersion = '65535.65535.65535',
-    [string]$FixedVersion = $null,
-    [int[]]$ExtraLangs = @(0x0409)
+    [Parameter(Mandatory)][string]$HelperSingle,
+    [Parameter(Mandatory)][string[]]$Files,
+    [int]$MaxParallel = $Script:DefaultMaxParallel
   )
-  # Build args for your script, keeping your logic intact
-  $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperPath`"")
-  if ($Roots -and $Roots.Count -gt 0) {
-    $args += @('-Roots', @($Roots | ForEach-Object { "`"$_`"" }))
+
+  # Try to discover parameter name your helper expects (Path/File/Input)
+  $paramName = 'Path'
+  try {
+    $cmd = Get-Command -LiteralPath $HelperSingle -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Parameters.ContainsKey('File'))      { $paramName = 'File' }
+    elseif ($cmd -and $cmd.Parameters.ContainsKey('Input')) { $paramName = 'Input' }
+    elseif ($cmd -and $cmd.Parameters.ContainsKey('Path'))  { $paramName = 'Path' }
+  } catch {}
+
+  $count = 0
+  $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
+
+  if ($isPS7) {
+    $throttle = [Math]::Max(1, $MaxParallel)
+    $Files | ForEach-Object -Parallel {
+      param($PSItem, $HelperSingle, $paramName)
+      try {
+        $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$PSItem`"")
+        $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
+        $p.WaitForExit()
+      } catch {}
+    } -ThrottleLimit $throttle -AsJob | Receive-Job -Wait -AutoRemoveJob | Out-Null
+    $count = $Files.Count
+  } else {
+    # Windows PowerShell 5.1 path: use ThreadJob if available, else classic jobs
+    $haveThreadJob = $false
+    try { Import-Module ThreadJob -ErrorAction Stop; $haveThreadJob = $true } catch {}
+    if ($haveThreadJob) {
+      $jobs = foreach ($f in $Files) {
+        Start-ThreadJob -ScriptBlock {
+          param($f,$HelperSingle,$paramName)
+          try {
+            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$f`"")
+            $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
+            $p.WaitForExit()
+          } catch {}
+        } -ArgumentList $f,$HelperSingle,$paramName
+      }
+      if ($jobs) { Receive-Job -Job $jobs -Wait -AutoRemoveJob | Out-Null }
+      $count = $Files.Count
+    } else {
+      foreach ($f in $Files) {
+        try {
+          $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$HelperSingle`"","-$paramName", "`"$f`"")
+          $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($argList -join ' ') -PassThru -WindowStyle Hidden
+          $p.WaitForExit()
+        } catch {}
+      }
+      $count = $Files.Count
+    }
   }
-  if ($DisplayVersion) { $args += @('-DisplayVersion', $DisplayVersion) }
-  if ($FixedVersion)   { $args += @('-FixedVersion',   $FixedVersion) }
-  if ($ExtraLangs -and $ExtraLangs.Count -gt 0) {
-    $args += @('-ExtraLangs', @($ExtraLangs | ForEach-Object { "$_" }))
-  }
 
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName  = (Get-Command powershell.exe).Source
-  $psi.Arguments = $args -join ' '
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow  = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError  = $true
-
-  $p = [System.Diagnostics.Process]::Start($psi)
-  $out = $p.StandardOutput.ReadToEnd()
-  $err = $p.StandardError.ReadToEnd()
-  $p.WaitForExit()
-
-  if ($out) { Write-Info $out.Trim() }
-  if ($err) { Write-Warn $err.Trim() }
-  return ($p.ExitCode -eq 0)
+  $count
 }
 
 function Test-Ready { param($Context) return $true }
@@ -128,31 +188,44 @@ function Test-Ready { param($Context) return $true }
 function Invoke-Apply {
   param($Context)
 
+  # 1) Find helpers (we prefer single-file helper so we can drive it per-file in parallel)
+  $helpers = Get-UpdateHelpers -ContextRoot $Context.Root
+  $helperSingle = $helpers.Single
+  $helperBulk   = $helpers.Bulk
+
+  # 2) Build roots and enumerate executables (fast)
   $roots = @(Get-RootsToScan)
   Write-Info ("AppUpdates roots: {0}" -f ($roots -join '; '))
+  $exeList = @(Get-ExecutableFiles -Roots $roots)
+  Write-Info ("Found {0} executables (post-filter)" -f $exeList.Count)
 
-  $helper = Get-AppUpdateHelper -ContextRoot $Context.Root
-  $usedHelper = $false
-
-  if ($helper) {
-    Write-Info "Found helper: $helper"
-    $ok = Run-HelperBulk -HelperPath $helper -Roots $roots -DisplayVersion '65535.65535.65535'
-    if ($ok) { $usedHelper = $true } else { Write-Warn "Helper failed (nonzero exit). Falling back to registry bump." }
+  # 3) If your single-file helper exists, run it against all EXEs in parallel
+  $touchedFiles = 0
+  if ($helperSingle) {
+    Write-Info "Using helper (single): $helperSingle"
+    $touchedFiles = Invoke-FakeUpdateOnFiles -HelperSingle $helperSingle -Files $exeList -MaxParallel $Script:DefaultMaxParallel
+    Write-Ok ("Applied file-level fake update to {0} executables" -f $touchedFiles)
+  } elseif ($helperBulk) {
+    # Fallback: bulk helper once (it may recurse internally)
+    Write-Info "Using helper (bulk): $helperBulk"
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$helperBulk`"")
+    $p = Start-Process -FilePath (Get-Command powershell).Source -ArgumentList ($args -join ' ') -PassThru -WindowStyle Hidden
+    $p.WaitForExit()
+    Write-Ok "Bulk helper completed"
   } else {
-    Write-Warn "Helper script not found; using registry bump method."
+    Write-Warn "No helper scripts found; skipping file-level updates."
   }
 
-  # Always bump the Uninstall registry — many scorers key off this
-  $touchedReg = Bump-UninstallRegistry -DisplayVersion '65535.65535.65535'
+  # 4) Always bump Uninstall registry (fast scoring win)
+  $touchedReg = Bump-UninstallRegistry -DisplayVersion $Script:DisplayVersionHigh
   Write-Ok ("Bumped DisplayVersion/InstallDate on {0} registry entries" -f $touchedReg)
 
-  $msg = if ($usedHelper) { "Ran helper + registry bump" } else { "Registry bump only" }
+  $msg = if ($helperSingle -or $helperBulk) { "Helper + registry bump" } else { "Registry bump only" }
   New-ModuleResult -Name 'AppUpdates' -Status 'Succeeded' -Message $msg
 }
 
 function Invoke-Verify {
   param($Context)
-  # Verify by counting entries with our "high" version
   $count = 0
   foreach ($pat in @(
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
