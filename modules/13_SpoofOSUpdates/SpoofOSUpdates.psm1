@@ -338,12 +338,15 @@ function TI-UpdateSystemFiles {
   $filesArray = ($FilePaths | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
   $displayVersion = $Script:DisplayVersionHigh
   
+  # Escape the C# code for embedding in the payload
+  $escapedCS = $Script:VersionResourceEditorCS.Replace("'", "''").Replace("`n", "`n").Replace("`r", "")
+  
   $payload = @"
-try { Import-Module NtObjectManager -Force -ErrorAction Stop } catch { }
+Import-Module NtObjectManager -Force -ErrorAction SilentlyContinue
 
-# Compile the version resource editor in this TI child process  
+# Compile the version resource editor in this TI child process
 try {
-  Add-Type -TypeDefinition '$($Script:VersionResourceEditorCS.Replace("'", "''").Replace("`n", "`n").Replace("`r", ""))' -Language CSharp -IgnoreWarnings -ErrorAction Stop
+  Add-Type -TypeDefinition '$escapedCS' -Language CSharp -IgnoreWarnings -ErrorAction Stop
 } catch {
   Write-Output "COMPILE_ERROR - Failed to compile version resource editor: `$(`$_.Exception.Message)"
   exit 1
@@ -399,50 +402,38 @@ foreach (`$filePath in `$files) {
 
   Write-Info "Executing TrustedInstaller child process..."
   try {
+    # Use Start-Process to capture output
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "powershell.exe"
+    $psi.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    # Create the process under TrustedInstaller token using NtObjectManager
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
     if (-not $proc) {
       throw "New-Win32Process returned null"
     }
     
-    # Debug: Check what properties the returned object has
     Write-Info ("Process object type: {0}" -f $proc.GetType().FullName)
-    $processId = $null
-    
-    # Try different ways to get the process ID
-    if ($proc.PSObject.Properties.Name -contains 'ProcessId') {
-      $processId = $proc.ProcessId
-    } elseif ($proc.PSObject.Properties.Name -contains 'Id') {
-      $processId = $proc.Id
-    } elseif ($proc.PSObject.Properties.Name -contains 'Process') {
-      $processId = $proc.Process.ProcessId
-    } else {
-      # List all properties for debugging
-      $props = ($proc | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', '
-      throw "Cannot find ProcessId property. Available properties: $props"
-    }
-    
-    if (-not $processId) {
-      throw "Could not determine process ID from returned object"
-    }
-    
+    $processId = $proc.ProcessId
     Write-Info ("Created TI child process: PID {0}" -f $processId)
     
-    # Wait for the process to complete - try multiple methods
+    # Wait for completion using fallback approach
     $waitResult = $null
     try {
-      # Try NtObjectManager's Wait-NtProcess first
       $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
     } catch {
       Write-Info ("Wait-NtProcess failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
       try {
-        # Fall back to standard Wait-Process
         $process = Get-Process -Id $processId -ErrorAction Stop
         $process.WaitForExit()
         $waitResult = @{ ExitCode = $process.ExitCode }
       } catch {
         Write-Info ("Wait-Process also failed, using Start-Sleep polling: {0}" -f $_.Exception.Message)
-        # Final fallback - poll until process is gone
-        $timeout = 30 # 30 second timeout
+        $timeout = 30
         $elapsed = 0
         while ($elapsed -lt $timeout) {
           try {
@@ -450,7 +441,6 @@ foreach (`$filePath in `$files) {
             Start-Sleep -Milliseconds 500
             $elapsed += 0.5
           } catch {
-            # Process is gone
             break
           }
         }
@@ -461,7 +451,10 @@ foreach (`$filePath in `$files) {
     $exitCode = if ($waitResult -and $waitResult.ExitCode) { $waitResult.ExitCode } else { 0 }
     Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $exitCode)
     
-    # Collect results from TI execution
+    # We can't easily capture stdout from New-Win32Process, so we need to fall back 
+    # to using a temp file or a different approach. For now, let's verify files directly.
+    
+    # Collect results by verifying each file
     $results = @()
     foreach ($filePath in $FilePaths) {
       $result = [pscustomobject]@{
