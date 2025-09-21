@@ -182,12 +182,13 @@ function Invoke-FakeUpdateOnFiles {
   if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
 
   $buildResult = {
-    param($path,$exit,$err)
+    param($path,$exit,$err,$output)
     [pscustomobject]@{
       Path    = $path
-      Success = ($exit -eq 0 -and -not $err)
+      Success = ($exit -eq 0 -and -not $err -and $output -notmatch 'Write-Error|Exception|Error:|Failed|Cannot')
       ExitCode= if ($null -ne $exit) { [int]$exit } else { 0 }
       Error   = $err
+      Output  = $output
     }
   }
 
@@ -200,15 +201,25 @@ function Invoke-FakeUpdateOnFiles {
       param($filePath,$paramName,$displayVersion,$exePath,$helperPath)
       $LASTEXITCODE = 0
       $errMessage = $null
+      $capturedOutput = $null
       $paramSwitch = "-$paramName"
       $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$helperPath,$paramSwitch,$filePath,'-DisplayVersion',$displayVersion)
+      
+      # Log the command being executed
+      Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
+      
       try {
-        & $exePath @args | Out-Null
+        $capturedOutput = & $exePath @args 2>&1 | Out-String
       } catch {
         $errMessage = $_.Exception.Message
       }
       $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
-      & $using:buildResult $filePath $exitCode $errMessage
+      
+      # Log the results
+      Write-Host "[DEBUG] File: $filePath, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow
+      Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
+      
+      & $using:buildResult $filePath $exitCode $errMessage $capturedOutput
     } -ArgumentList $paramName,$displayVersion,$exePath,$HelperSingle -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob
     if ($job) {
       $results = @(@(Receive-Job -Job $job -Wait -AutoRemoveJob))
@@ -222,19 +233,30 @@ function Invoke-FakeUpdateOnFiles {
           param($f,$HelperSingle,$paramName,$exePath,$displayVersion)
           $LASTEXITCODE = 0
           $errMessage = $null
+          $capturedOutput = $null
           $paramSwitch = "-$paramName"
           $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
+          
+          # Log the command being executed  
+          Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
+          
           try {
-            & $exePath @args | Out-Null
+            $capturedOutput = & $exePath @args 2>&1 | Out-String
           } catch {
             $errMessage = $_.Exception.Message
           }
           $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+          
+          # Log the results
+          Write-Host "[DEBUG] File: $f, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow  
+          Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
+          
           [pscustomobject]@{
             Path    = $f
-            Success = ($exitCode -eq 0 -and -not $errMessage)
+            Success = ($exitCode -eq 0 -and -not $errMessage -and $capturedOutput -notmatch 'Write-Error|Exception|Error:|Failed|Cannot')
             ExitCode= $exitCode
             Error   = $errMessage
+            Output  = $capturedOutput
           }
         } -ArgumentList $f,$HelperSingle,$paramName,$exePath,$displayVersion
       }
@@ -245,19 +267,30 @@ function Invoke-FakeUpdateOnFiles {
       $results = foreach ($f in $Files) {
         $LASTEXITCODE = 0
         $errMessage = $null
+        $capturedOutput = $null
         $paramSwitch = "-$paramName"
         $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
+        
+        # Log the command being executed
+        Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
+        
         try {
-          & $exePath @args | Out-Null
+          $capturedOutput = & $exePath @args 2>&1 | Out-String
         } catch {
           $errMessage = $_.Exception.Message
         }
         $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+        
+        # Log the results
+        Write-Host "[DEBUG] File: $f, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow
+        Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
+        
         [pscustomobject]@{
           Path    = $f
-          Success = ($exitCode -eq 0 -and -not $errMessage)
+          Success = ($exitCode -eq 0 -and -not $errMessage -and $capturedOutput -notmatch 'Write-Error|Exception|Error:|Failed|Cannot')
           ExitCode= $exitCode
           Error   = $errMessage
+          Output  = $capturedOutput
         }
       }
     }
@@ -267,9 +300,9 @@ function Invoke-FakeUpdateOnFiles {
 
   $failures = $results | Where-Object { -not $_.Success }
   foreach ($fail in $failures) {
-    $msg = "Helper failed for $($fail.Path) (exit $($fail.ExitCode))"
-    if ($fail.Error) { $msg += ": $($fail.Error)" }
-    Write-Warn $msg
+    Write-Warn "Helper failed for $($fail.Path) (exit $($fail.ExitCode))"
+    if ($fail.Error) { Write-Warn "  Exception: $($fail.Error)" }
+    if ($fail.Output) { Write-Warn "  Output: $($fail.Output)" }
   }
 
   $successes = @($results | Where-Object { $_.Success })
