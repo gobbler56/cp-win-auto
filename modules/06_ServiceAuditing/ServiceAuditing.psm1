@@ -282,9 +282,9 @@ function TI-ApplyStartValues([hashtable]$Map) {
   }
 
   # Build a compact payload for the TI child
-  $pairs = $Map.GetEnumerator() | ForEach-Object {
+  $pairs = ($Map.GetEnumerator() | ForEach-Object {
     "'{0}'={1}" -f $_.Key.Replace("'", "''"), [int]$_.Value
-  } -join ';'
+  }) -join ';'
 
   $payload = @"
 `$pairs = @{ $pairs }

@@ -332,6 +332,8 @@ function TI-UpdateSystemFiles {
     return Update-SystemFileVersions -FilePaths $FilePaths
   }
 
+  Write-Info ("Found TrustedInstaller process: PID {0}" -f $ti.ProcessId)
+
   # Build PowerShell payload for TI execution
   $filesArray = ($FilePaths | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
   $displayVersion = $Script:DisplayVersionHigh
@@ -385,10 +387,16 @@ foreach (`$filePath in `$files) {
   $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
   $cmd = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
 
+  Write-Info "Executing TrustedInstaller child process..."
   try {
     $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
-    Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
-    Write-Ok "TrustedInstaller file update process completed"
+    if ($proc -and $proc.ProcessId) {
+      Write-Info ("Created TI child process: PID {0}" -f $proc.ProcessId)
+      $waitResult = Wait-NtProcess -ProcessId $proc.ProcessId
+      Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $waitResult.ExitCode)
+    } else {
+      throw "New-Win32Process returned invalid process object"
+    }
     
     # Collect results from TI execution
     $results = @()
@@ -418,7 +426,7 @@ foreach (`$filePath in `$files) {
     
     return $results
   } catch {
-    Write-Warn ("TrustedInstaller execution failed: {0}" -f $_.Exception.Message)
+    Write-Warn ("TrustedInstaller child process execution failed: {0}" -f $_.Exception.Message)
     Write-Info "Falling back to local file updates..."
     return Update-SystemFileVersions -FilePaths $FilePaths
   }
@@ -430,6 +438,7 @@ function Invoke-Apply {
   param($Context)
   
   Write-Info "Starting OS version spoofing for scoring systems..."
+  Write-Info "Note: This module attempts to update critical system files that may require TrustedInstaller privileges"
   
   # Pre-compile C# version resource editor for use by both local and TrustedInstaller operations
   Write-Info ("Pre-compiling version resource editor...")
