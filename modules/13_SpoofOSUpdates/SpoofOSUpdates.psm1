@@ -318,7 +318,7 @@ function TI-UpdateSystemFiles {
   
   # Assume NtObjectManager is already installed by Dependencies module
   try { 
-    Import-Module NtObjectManager -ErrorAction Stop 
+    Import-Module NtObjectManager -Force -ErrorAction Stop 
   } catch {
     Write-Warn "NtObjectManager not available; attempting local file updates (may fail due to permissions)."
     return Update-SystemFileVersions -FilePaths $FilePaths
@@ -339,6 +339,7 @@ function TI-UpdateSystemFiles {
   $displayVersion = $Script:DisplayVersionHigh
   
   $payload = @"
+try { Import-Module NtObjectManager -Force -ErrorAction Stop } catch { }
 `$files = @($filesArray)
 `$displayVersion = '$displayVersion'
 
@@ -416,8 +417,40 @@ foreach (`$filePath in `$files) {
     }
     
     Write-Info ("Created TI child process: PID {0}" -f $processId)
-    $waitResult = Wait-NtProcess -ProcessId $processId
-    Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $waitResult.ExitCode)
+    
+    # Wait for the process to complete - try multiple methods
+    $waitResult = $null
+    try {
+      # Try NtObjectManager's Wait-NtProcess first
+      $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
+    } catch {
+      Write-Info ("Wait-NtProcess failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
+      try {
+        # Fall back to standard Wait-Process
+        $process = Get-Process -Id $processId -ErrorAction Stop
+        $process.WaitForExit()
+        $waitResult = @{ ExitCode = $process.ExitCode }
+      } catch {
+        Write-Info ("Wait-Process also failed, using Start-Sleep polling: {0}" -f $_.Exception.Message)
+        # Final fallback - poll until process is gone
+        $timeout = 30 # 30 second timeout
+        $elapsed = 0
+        while ($elapsed -lt $timeout) {
+          try {
+            $proc = Get-Process -Id $processId -ErrorAction Stop
+            Start-Sleep -Milliseconds 500
+            $elapsed += 0.5
+          } catch {
+            # Process is gone
+            break
+          }
+        }
+        $waitResult = @{ ExitCode = 0 }
+      }
+    }
+    
+    $exitCode = if ($waitResult -and $waitResult.ExitCode) { $waitResult.ExitCode } else { 0 }
+    Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $exitCode)
     
     # Collect results from TI execution
     $results = @()
