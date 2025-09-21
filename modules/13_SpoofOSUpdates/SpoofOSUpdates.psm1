@@ -390,7 +390,7 @@ foreach (`$filePath in `$files) {
 
   try {
     Write-Info ("Executing system file updates via TrustedInstaller...")
-    $proc = New-Win32Process -FilePath powershell.exe -CreationFlags NoWindow -ParentProcess $ti -CommandLine $cmd
+    $proc = New-Win32Process -CreationFlags NoWindow -ParentProcess $ti -CommandLine $cmd
     Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
     Write-Ok "TrustedInstaller file update process completed"
     
