@@ -338,8 +338,22 @@ function TI-UpdateSystemFiles {
   $filesArray = ($FilePaths | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
   $displayVersion = $Script:DisplayVersionHigh
   
+  # Escape the C# code for embedding in the payload
+  $escapedCS = $Script:VersionResourceEditorCS.Replace('"', '""').Replace('`', '``')
+  
   $payload = @"
 try { Import-Module NtObjectManager -Force -ErrorAction Stop } catch { }
+
+# Compile the version resource editor in this TI child process
+try {
+  Add-Type -TypeDefinition @"
+$escapedCS
+"@ -Language CSharp -IgnoreWarnings -ErrorAction Stop
+} catch {
+  Write-Output "COMPILE_ERROR - Failed to compile version resource editor: `$(`$_.Exception.Message)"
+  exit 1
+}
+
 `$files = @($filesArray)
 `$displayVersion = '$displayVersion'
 
