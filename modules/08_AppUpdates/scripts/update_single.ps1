@@ -215,7 +215,7 @@ try {
     $DisplayVersion,
     [uint16]$maj, [uint16]$min, [uint16]$bld, [uint16]$rev
   )
-  Write-Host "✔ Updated '$Path'"
+  Write-Host "SUCCESS: Updated '$Path'"
   Write-Host "   Displayed File/Product version : $DisplayVersion"
   Write-Host "   Fixed (binary) version         : $maj.$min.$bld.$rev"
   Write-Host "   Backup saved to                : $backup"
