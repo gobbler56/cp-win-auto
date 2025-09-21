@@ -250,29 +250,11 @@ function Parse-RegServices {
   $map
 }
 
-function Ensure-NtObjectManager {
-  try { Import-Module NtObjectManager -ErrorAction Stop; return $true } catch {
-    try {
-      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-      if (-not (Get-PackageProvider -Name NuGet -EA SilentlyContinue)) {
-        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-      }
-      $repo = Get-PSRepository -Name PSGallery -EA SilentlyContinue
-      if (-not $repo) { Register-PSRepository -Default }
-      elseif ($repo.InstallationPolicy -ne 'Trusted') { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted }
-      Install-Module -Name NtObjectManager -Repository PSGallery -Force -Scope AllUsers -AllowClobber -AcceptLicense
-      Import-Module NtObjectManager -ErrorAction Stop
-      return $true
-    } catch {
-      Write-Warn ("Failed to install/import NtObjectManager: {0}" -f $_.Exception.Message)
-      return $false
-    }
-  }
-}
-
 function TI-ApplyStartValues([hashtable]$Map) {
-  $haveTI = Ensure-NtObjectManager
-  if (-not $haveTI) {
+  # Assume NtObjectManager is already installed by Dependencies module
+  try { 
+    Import-Module NtObjectManager -ErrorAction Stop 
+  } catch {
     Write-Warn "NtObjectManager not available; applying locally (protected services may fail)."
     foreach($name in $Map.Keys){
       $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"

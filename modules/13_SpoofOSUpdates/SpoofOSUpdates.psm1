@@ -176,26 +176,6 @@ public static class OSVersionResourceEditor
 }
 "@
 
-function Ensure-NtObjectManager {
-  try { Import-Module NtObjectManager -ErrorAction Stop; return $true } catch {
-    try {
-      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-      if (-not (Get-PackageProvider -Name NuGet -EA SilentlyContinue)) {
-        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-      }
-      $repo = Get-PSRepository -Name PSGallery -EA SilentlyContinue
-      if (-not $repo) { Register-PSRepository -Default }
-      elseif ($repo.InstallationPolicy -ne 'Trusted') { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted }
-      Install-Module -Name NtObjectManager -Repository PSGallery -Force -Scope AllUsers -AllowClobber -AcceptLicense
-      Import-Module NtObjectManager -ErrorAction Stop
-      return $true
-    } catch {
-      Write-Warn ("Failed to install/import NtObjectManager: {0}" -f $_.Exception.Message)
-      return $false
-    }
-  }
-}
-
 function Find-SystemFiles {
   param([string[]]$FileNames)
   
@@ -336,8 +316,10 @@ function Update-SystemFileVersions {
 function TI-UpdateSystemFiles {
   param([string[]]$FilePaths)
   
-  $haveTI = Ensure-NtObjectManager
-  if (-not $haveTI) {
+  # Assume NtObjectManager is already installed by Dependencies module
+  try { 
+    Import-Module NtObjectManager -ErrorAction Stop 
+  } catch {
     Write-Warn "NtObjectManager not available; attempting local file updates (may fail due to permissions)."
     return Update-SystemFileVersions -FilePaths $FilePaths
   }
@@ -410,7 +392,7 @@ foreach (`$filePath in `$files) {
 
   try {
     Write-Info ("Executing system file updates via TrustedInstaller...")
-    $proc = New-Win32Process powershell.exe -CreationFlags CreateNoWindow -ParentProcess $ti -CommandLine $cmd
+    $proc = New-Win32Process powershell.exe -CreationFlags NoWindow -ParentProcess $ti -CommandLine $cmd
     Wait-NtProcess -ProcessId $proc.ProcessId | Out-Null
     Write-Ok "TrustedInstaller file update process completed"
     

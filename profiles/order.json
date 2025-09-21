@@ -1,5 +1,6 @@
 {
   "order": [
+    "Dependencies",
     "UserAuditing",
     "LocalPolicy",
     "ApplicationSecurity",

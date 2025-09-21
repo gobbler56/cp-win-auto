@@ -1,5 +1,6 @@
 {
   "categoryOrder": [
+    "Dependencies",
     "UserAuditing",
     "LocalPolicy",
     "ApplicationSecurity",
