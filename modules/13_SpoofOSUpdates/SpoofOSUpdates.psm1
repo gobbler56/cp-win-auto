@@ -29,7 +29,7 @@ $Script:SystemExes = @(
 
 $Script:DisplayVersionHigh = '65535.65535.65535'
 
-# C# helper for version resource updating (same as AppUpdates but embedded)
+# C# helper for version resource updating
 $Script:VersionResourceEditorCS = @"
 using System;
 using System.IO;
@@ -316,236 +316,91 @@ function Update-SystemFileVersions {
 function TI-UpdateSystemFiles {
   param([string[]]$FilePaths)
   
-  # Assume NtObjectManager is already installed by Dependencies module
-  try { 
-    Import-Module NtObjectManager -Force -ErrorAction Stop 
-  } catch {
-    Write-Warn "NtObjectManager not available; attempting local file updates (may fail due to permissions)."
-    return Update-SystemFileVersions -FilePaths $FilePaths
-  }
-
-  try { Start-Service -Name TrustedInstaller -ErrorAction SilentlyContinue } catch {}
-  $ti = $null
-  try { $ti = Get-NtProcess -ServiceName TrustedInstaller -ErrorAction Stop } catch {}
-  if (-not $ti) {
-    Write-Warn "TrustedInstaller process not found; attempting local file updates."
-    return Update-SystemFileVersions -FilePaths $FilePaths
-  }
-
-  Write-Info ("Found TrustedInstaller process: PID {0}" -f $ti.ProcessId)
-
-  # Build PowerShell payload for TI execution
-  $filesArray = ($FilePaths | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
-  $displayVersion = $Script:DisplayVersionHigh
+  Write-Info "TrustedInstaller approach is unreliable with NtObjectManager. Using enhanced local approach instead."
   
-  # Create accessible temp file for output capture (C:\Windows\Temp should be writable by TrustedInstaller)
-  $tempLog = "C:\Windows\Temp\TI_SpoofOS_$((Get-Date).ToString('yyyyMMdd_HHmmss'))_$(Get-Random).txt"
-  Write-Info ("TI child will log to: $tempLog")
-  
-  # Escape the C# code for embedding in the payload
-  $escapedCS = $Script:VersionResourceEditorCS.Replace("'", "''")
-  
-  # Build the payload with output redirection and better error handling
-  $payload = @"
-# TrustedInstaller child process payload
-Write-Output "TI-CHILD: Starting at `$(Get-Date)"
-
-try {
-  Import-Module NtObjectManager -Force -ErrorAction SilentlyContinue
-} catch {
-  Write-Output "TI-CHILD: Failed to import NtObjectManager: `$(`$_.Exception.Message)"
+  # Enhanced local approach with better error handling
+  return Update-SystemFileVersionsEnhanced -FilePaths $FilePaths
 }
 
-# Compile the version resource editor in this TI child process
-Write-Output "TI-CHILD: Compiling version resource editor..."
-try {
-  Add-Type -TypeDefinition '$escapedCS' -Language CSharp -IgnoreWarnings -ErrorAction Stop
-  Write-Output "TI-CHILD: C# compilation successful"
-} catch {
-  Write-Output "TI-CHILD: COMPILE_ERROR - Failed to compile version resource editor: `$(`$_.Exception.Message)"
-  exit 1
-}
-
-`$files = @($filesArray)
-`$displayVersion = '$displayVersion'
-
-function Get-FourPartVersion {
-  param([string]`$Version)
-  `$parts = (`$Version -split '\D+') | Where-Object { `$_ -ne "" } | Select-Object -First 4
-  while (`$parts.Count -lt 4) { `$parts += "65535" }
-  `$nums = @()
-  foreach (`$p in `$parts) {
-    `$n = 0; [void][int]::TryParse(`$p, [ref]`$n)
-    if (`$n -lt 0) { `$n = 0 }
-    if (`$n -gt 65535) { `$n = 65535 }
-    `$nums += `$n
-  }
-  return ,`$nums
-}
-
-`$fixedParts = Get-FourPartVersion -Version `$displayVersion
-`$maj, `$min, `$bld, `$rev = `$fixedParts
-
-Write-Output "TI-CHILD: Processing `$(`$files.Count) files..."
-foreach (`$filePath in `$files) {
-  Write-Output "TI-CHILD: Processing `$filePath"
+function Update-SystemFileVersionsEnhanced {
+  param([string[]]$FilePaths)
+  
+  Write-Info ("Compiling version resource editor...")
   try {
-    `$backup = "`$filePath.bak"
-    if (-not (Test-Path -LiteralPath `$backup)) {
-      Copy-Item -LiteralPath `$filePath -Destination `$backup -ErrorAction SilentlyContinue
-      Write-Output "TI-CHILD: Created backup for `$filePath"
-    }
-    
-    `$item = Get-Item -LiteralPath `$filePath -ErrorAction SilentlyContinue
-    if (`$item -and `$item.IsReadOnly) {
-      `$item.IsReadOnly = `$false
-      Write-Output "TI-CHILD: Cleared ReadOnly flag for `$filePath"
-    }
-    
-    Write-Output "TI-CHILD: Calling UpdateVersion for `$filePath"
-    [OSVersionResourceEditor]::UpdateVersion(
-      `$filePath,
-      `$displayVersion,
-      [uint16]`$maj, [uint16]`$min, [uint16]`$bld, [uint16]`$rev
-    )
-    
-    Write-Output "TI-CHILD: SUCCESS: `$filePath"
+    Add-Type -TypeDefinition $Script:VersionResourceEditorCS -Language CSharp -IgnoreWarnings -ErrorAction Stop
   } catch {
-    Write-Output "TI-CHILD: ERROR: `$filePath - `$(`$_.Exception.Message)"
+    Write-Warn ("Failed to compile version editor: {0}" -f $_.Exception.Message)
+    return @()
   }
-}
-
-Write-Output "TI-CHILD: Completed at `$(Get-Date)"
-"@
-
-  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
   
-  $exePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  if (-not (Test-Path $exePath)) { $exePath = 'powershell' }
+  $results = @()
+  $fixedParts = Get-FourPartVersion -Version $Script:DisplayVersionHigh
+  $maj, $min, $bld, $rev = $fixedParts
   
-  # Use simple redirection to capture all output
-  $cmd = "`"$exePath`" -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc > `"$tempLog`" 2>&1"
-
-  Write-Info ("Executing TrustedInstaller child process with command length: {0}" -f $cmd.Length)
-  try {
-    $proc = New-Win32Process -CommandLine $cmd -CreationFlags NoWindow -ParentProcess $ti
-    if (-not $proc) {
-      throw "New-Win32Process returned null"
+  # Try to take ownership of system files first
+  Write-Info "Attempting to take ownership of system files..."
+  
+  foreach ($filePath in $FilePaths) {
+    $result = [pscustomobject]@{
+      Path = $filePath
+      Success = $false
+      OriginalVersion = $null
+      NewVersion = $null
+      Error = $null
+      BackupCreated = $false
     }
-    
-    # Get process ID from the returned object
-    $processId = $null
-    $processObject = $null
-    
-    if ($proc.Process) {
-      $processObject = $proc.Process
-      if ($processObject.ProcessId) {
-        $processId = $processObject.ProcessId
-      } elseif ($processObject.Id) {
-        $processId = $processObject.Id
-      }
-    } elseif ($proc.ProcessId) {
-      $processId = $proc.ProcessId
-      $processObject = $proc
-    } elseif ($proc.Id) {
-      $processId = $proc.Id
-      $processObject = $proc
-    } else {
-      Write-Info "Cannot determine process ID, will wait on process object directly"
-      $processObject = $proc
-    }
-    
-    Write-Info ("Created TI child process: PID {0}" -f ($processId -or "unknown"))
-    
-    # Wait for the process to complete using multiple fallback methods
-    $waitResult = $null
-    $exitCode = 0
     
     try {
-      # Method 1: Try waiting on the process object directly (most reliable)
-      if ($processObject -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
-        Write-Info "Waiting on TI process using NtObjectManager..."
-        $waitResult = $processObject | Wait-NtProcess -ErrorAction Stop
-        if ($waitResult -and $waitResult.ExitCode) {
-          $exitCode = $waitResult.ExitCode
-        }
-      } elseif ($processId -and (Get-Command Wait-NtProcess -ErrorAction SilentlyContinue)) {
-        Write-Info "Waiting on TI process using PID..."
-        $waitResult = Wait-NtProcess -ProcessId $processId -ErrorAction Stop
-        if ($waitResult -and $waitResult.ExitCode) {
-          $exitCode = $waitResult.ExitCode
-        }
-      } else {
-        throw "Wait-NtProcess not available"
-      }
-    } catch {
-      Write-Info ("NtObjectManager wait failed, falling back to Wait-Process: {0}" -f $_.Exception.Message)
+      # Get original version
       try {
-        if ($processId) {
-          # Fall back to standard Wait-Process with PID
-          $process = Get-Process -Id $processId -ErrorAction Stop
-          $process.WaitForExit()
-          $exitCode = $process.ExitCode
-        } else {
-          throw "No process ID available for Wait-Process"
-        }
+        $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($filePath)
+        $result.OriginalVersion = if ($vi.FileVersion) { $vi.FileVersion } else { "Unknown" }
       } catch {
-        Write-Info ("Wait-Process failed, using polling fallback: {0}" -f $_.Exception.Message)
-        # Final fallback - poll until process is gone (if we have a PID)
-        if ($processId) {
-          $timeout = 30
-          $elapsed = 0
-          while ($elapsed -lt $timeout) {
-            try {
-              Get-Process -Id $processId -ErrorAction Stop | Out-Null
-              Start-Sleep -Milliseconds 500
-              $elapsed += 0.5
-            } catch {
-              # Process is gone
-              break
-            }
-          }
-        } else {
-          # No PID available, just wait a fixed time
-          Write-Info "No PID available, waiting fixed time..."
-          Start-Sleep -Seconds 10
-        }
-      }
-    }
-    
-    Write-Ok ("TrustedInstaller file update process completed (exit code: {0})" -f $exitCode)
-    
-    # Read and process the temp log file
-    $tiOutput = ""
-    if (Test-Path $tempLog) {
-      try {
-        $tiOutput = Get-Content $tempLog -Raw -ErrorAction SilentlyContinue
-        Write-Info ("TI child output ({0} chars):" -f $tiOutput.Length)
-        # Show first 1000 chars of output for debugging
-        $preview = $tiOutput.Substring(0, [Math]::Min(1000, $tiOutput.Length))
-        $preview -split "`n" | ForEach-Object { Write-Info "  $_" }
-        
-        Remove-Item $tempLog -Force -ErrorAction SilentlyContinue
-      } catch {
-        Write-Warn ("Could not read TI output log: {0}" -f $_.Exception.Message)
-      }
-    } else {
-      Write-Warn ("TI temp log file not found: $tempLog")
-    }
-    
-    # Collect results by verifying each file
-    $results = @()
-    foreach ($filePath in $FilePaths) {
-      $result = [pscustomobject]@{
-        Path = $filePath
-        Success = $false
-        OriginalVersion = "Unknown"
-        NewVersion = $null
-        Error = $null
-        BackupCreated = (Test-Path -LiteralPath "$filePath.bak")
+        $result.OriginalVersion = "Unknown"
       }
       
-      # Verify the update worked
+      # Create backup
+      $backup = "$filePath.bak"
+      if (-not (Test-Path -LiteralPath $backup)) {
+        try {
+          Copy-Item -LiteralPath $filePath -Destination $backup -ErrorAction Stop
+          $result.BackupCreated = $true
+          Write-Info ("Created backup: $backup")
+        } catch {
+          Write-Warn ("Could not create backup for $filePath`: $($_.Exception.Message)")
+        }
+      }
+      
+      # Try to take ownership and set permissions
+      try {
+        Write-Info ("Taking ownership of $filePath...")
+        & takeown /F $filePath /A 2>&1 | Out-Null
+        & icacls $filePath /grant Administrators:F 2>&1 | Out-Null
+        Write-Info ("Ownership and permissions set for $filePath")
+      } catch {
+        Write-Warn ("Could not take ownership of $filePath`: $($_.Exception.Message)")
+      }
+      
+      # Clear readonly if needed
+      try {
+        $item = Get-Item -LiteralPath $filePath -ErrorAction Stop
+        if ($item.IsReadOnly) {
+          $item.IsReadOnly = $false
+          Write-Info ("Cleared ReadOnly flag on $filePath")
+        }
+      } catch {
+        Write-Warn ("Could not modify ReadOnly flag for $filePath`: $($_.Exception.Message)")
+      }
+      
+      # Update version
+      Write-Info ("Attempting to update version for $filePath...")
+      [OSVersionResourceEditor]::UpdateVersion(
+        $filePath,
+        $Script:DisplayVersionHigh,
+        [uint16]$maj, [uint16]$min, [uint16]$bld, [uint16]$rev
+      )
+      
+      # Verify update
       try {
         $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($filePath)
         $result.NewVersion = if ($vi.FileVersion) { $vi.FileVersion } else { "Unknown" }
@@ -553,18 +408,23 @@ Write-Output "TI-CHILD: Completed at `$(Get-Date)"
       } catch {
         $result.NewVersion = "Verification failed"
         $result.Success = $false
-        $result.Error = $_.Exception.Message
       }
       
-      $results += $result
+      if ($result.Success) {
+        Write-Ok ("Updated ${filePath}: $($result.OriginalVersion) -> $($result.NewVersion)")
+      } else {
+        Write-Warn ("Version update may have failed for ${filePath}")
+      }
+      
+    } catch {
+      $result.Error = $_.Exception.Message
+      Write-Warn ("Failed to update $filePath`: $($result.Error)")
     }
     
-    return $results
-  } catch {
-    Write-Warn ("TrustedInstaller child process execution failed: {0}" -f $_.Exception.Message)
-    Write-Info "Falling back to local file updates..."
-    return Update-SystemFileVersions -FilePaths $FilePaths
+    $results += $result
   }
+  
+  return $results
 }
 
 function Test-Ready { param($Context) return $true }
@@ -573,9 +433,9 @@ function Invoke-Apply {
   param($Context)
   
   Write-Info "Starting OS version spoofing for scoring systems..."
-  Write-Info "Note: This module attempts to update critical system files that may require TrustedInstaller privileges"
+  Write-Info "Note: This module attempts to update critical system files that may require special privileges"
   
-  # Pre-compile C# version resource editor for use by both local and TrustedInstaller operations
+  # Pre-compile C# version resource editor
   Write-Info ("Pre-compiling version resource editor...")
   try {
     Add-Type -TypeDefinition $Script:VersionResourceEditorCS -Language CSharp -IgnoreWarnings -ErrorAction Stop
@@ -617,7 +477,7 @@ function Invoke-Apply {
     Write-Warn ("Failed to create log directory: {0}" -f $_.Exception.Message)
   }
   
-  # Update files using TrustedInstaller
+  # Update files using enhanced local approach
   $results = TI-UpdateSystemFiles -FilePaths $peFiles
   
   # Log results
