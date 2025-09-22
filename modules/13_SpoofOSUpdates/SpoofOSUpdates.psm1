@@ -337,13 +337,7 @@ $Script:VersionResourceEditorCS
 
 # File paths to update
 `$files = @(
-$(for ($i = 0; $i -lt $FilePaths.Count; $i++) {
-    if ($i -eq $FilePaths.Count - 1) {
-        "    '$($FilePaths[$i])'"
-    } else {
-        "    '$($FilePaths[$i])',"  
-    }
-} | Out-String).Trim()
+$(($FilePaths | ForEach-Object { "    '$_'" }) -join ",`n")
 )
 
 `$successCount = 0
@@ -479,11 +473,11 @@ function Invoke-Apply {
         $scriptInfo = Create-UpdateScript -DesktopPath $powerRunInfo.DesktopPath -FilePaths $peFiles
         
         # Execute the script via PowerRun as SYSTEM
-        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptInfo $scriptInfo
+        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptPath $scriptInfo
         
         # Clean up
         try {
-            Remove-Item -Path $scriptInfo.ScriptPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $scriptInfo -Force -ErrorAction SilentlyContinue
             Write-Info "Cleaned up temporary script"
         } catch { }
         
