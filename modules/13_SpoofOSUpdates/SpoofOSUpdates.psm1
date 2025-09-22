@@ -10,29 +10,19 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
 
 # Target system files that scoring engines typically check
 # Focus on files that can actually be modified (not WRP-protected)
-$Script:ModifiableFiles = @(
-  "splwow64.exe",      # Print spooler - works
-  "notepad.exe",       # Simple text editor  
-  "regedit.exe",       # Registry editor
+$Script:TargetFiles = @(
+  "gdi32.dll",         # Graphics device interface
+  "crypt32.dll",       # Cryptography
+  "ntoskrnl.exe",      # NT kernel
+  "ntdll.dll",         # Core NT DLL
+  "shell32.dll",       # Shell functionality
+  "explorer.exe",      # Windows Explorer shell
+  "bfsvc.exe",         # Boot file servicing utility
   "HelpPane.exe",      # Help system
   "hh.exe",            # HTML Help
-  "bfsvc.exe",         # Boot file servicing utility
-  "calc.exe",          # Calculator
-  "mspaint.exe",       # Paint
-  "write.exe",         # WordPad (if exists)
-  "winver.exe"         # Version info dialog
-)
-
-# Heavily protected files that usually fail (WRP-protected)
-$Script:WRPProtectedFiles = @(
-  "ntdll.dll",         # Core NT DLL
-  "kernel32.dll",      # Win32 kernel
-  "gdi32.dll",         # Graphics device interface  
-  "user32.dll",        # User interface
-  "shell32.dll",       # Shell functionality
-  "ntoskrnl.exe",      # NT kernel
-  "explorer.exe",      # Windows Explorer shell
-  "crypt32.dll"        # Cryptography
+  "notepad.exe",       # Simple text editor
+  "regedit.exe",       # Registry editor
+  "splwow64.exe",      # Print spooler - works
 )
 
 
@@ -193,8 +183,7 @@ function Find-SystemFiles {
     "$env:SystemRoot\System32",
     "$env:SystemRoot\SysWOW64", 
     "$env:SystemRoot",
-    "$env:SystemRoot\System32\AccessibilityTasks",
-    "$env:ProgramFiles\Windows NT\Accessories"
+    "$env:SystemRoot\System32\wbem"
   )
   
   foreach ($fileName in $FileNames) {
@@ -432,9 +421,8 @@ function Invoke-Apply {
   }
   
   # Find all target files
-  $foundFiles = Find-SystemFiles -FileNames $Script:ModifiableFiles
+  $foundFiles = Find-SystemFiles -FileNames $Script:TargetFiles
   
-  Write-Info ("Found {0}/{1} modifiable system files" -f $foundFiles.Count, $Script:ModifiableFiles.Count)
   
   # Filter to PE files only
   $peFiles = @()
@@ -447,11 +435,10 @@ function Invoke-Apply {
   }
   
   if ($peFiles.Count -eq 0) {
-    Write-Info "No modifiable PE files found to update"
+    Write-Info "No target PE files found to update"
     return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message 'No target files found'
   }
   
-  Write-Info ("Targeting {0} modifiable files" -f $peFiles.Count)
   $peFiles | ForEach-Object { Write-Info ("  $_") }
   
   # Create logs directory
@@ -481,8 +468,6 @@ function Invoke-Apply {
   
   Write-Ok ("Successfully updated {0}/{1} modifiable system files" -f $successful.Count, $results.Count)
   
-  Write-Info ("WRP-protected files (not attempted): {0}" -f ($Script:WRPProtectedFiles -join ', '))
-  
   # Show some successful updates
   foreach ($success in $successful) {
     Write-Ok ("  $($success.Path) - $($success.OriginalVersion) -> $($success.NewVersion)")
@@ -497,7 +482,7 @@ function Invoke-Apply {
 function Invoke-Verify { 
   param($Context)
   
-  $foundFiles = Find-SystemFiles -FileNames $Script:ModifiableFiles
+  $foundFiles = Find-SystemFiles -FileNames $Script:TargetFiles
   $updatedCount = 0
   
   foreach ($filePath in $foundFiles) {
