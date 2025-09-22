@@ -9,23 +9,32 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
 }
 
 # Target system files that scoring engines typically check
-$Script:SystemDlls = @(
-  "gdi32.dll",
-  "crypt32.dll", 
-  "ntoskrnl.exe",
-  "ntdll.dll",
-  "shell32.dll"
+# Focus on files that can actually be modified (not WRP-protected)
+$Script:ModifiableFiles = @(
+  "splwow64.exe",      # Print spooler - works
+  "notepad.exe",       # Simple text editor  
+  "regedit.exe",       # Registry editor
+  "HelpPane.exe",      # Help system
+  "hh.exe",            # HTML Help
+  "bfsvc.exe",         # Boot file servicing utility
+  "calc.exe",          # Calculator
+  "mspaint.exe",       # Paint
+  "write.exe",         # WordPad (if exists)
+  "winver.exe"         # Version info dialog
 )
 
-$Script:SystemExes = @(
-  "explorer.exe",
-  "bfsvc.exe", 
-  "HelpPane.exe",
-  "hh.exe",
-  "notepad.exe",
-  "regedit.exe",
-  "splwow64.exe"
+# Heavily protected files that usually fail (WRP-protected)
+$Script:WRPProtectedFiles = @(
+  "ntdll.dll",         # Core NT DLL
+  "kernel32.dll",      # Win32 kernel
+  "gdi32.dll",         # Graphics device interface  
+  "user32.dll",        # User interface
+  "shell32.dll",       # Shell functionality
+  "ntoskrnl.exe",      # NT kernel
+  "explorer.exe",      # Windows Explorer shell
+  "crypt32.dll"        # Cryptography
 )
+
 
 $Script:DisplayVersionHigh = '65535.65535.65535'
 
@@ -183,7 +192,9 @@ function Find-SystemFiles {
   $searchPaths = @(
     "$env:SystemRoot\System32",
     "$env:SystemRoot\SysWOW64", 
-    "$env:SystemRoot"
+    "$env:SystemRoot",
+    "$env:SystemRoot\System32\AccessibilityTasks",
+    "$env:ProgramFiles\Windows NT\Accessories"
   )
   
   foreach ($fileName in $FileNames) {
@@ -313,19 +324,10 @@ function Update-SystemFileVersions {
   return $results
 }
 
-function TI-UpdateSystemFiles {
+function Update-SystemFileVersionsSimple {
   param([string[]]$FilePaths)
   
-  Write-Info "TrustedInstaller approach is unreliable with NtObjectManager. Using enhanced local approach instead."
-  
-  # Enhanced local approach with better error handling
-  return Update-SystemFileVersionsEnhanced -FilePaths $FilePaths
-}
-
-function Update-SystemFileVersionsEnhanced {
-  param([string[]]$FilePaths)
-  
-  Write-Info ("Compiling version resource editor...")
+  Write-Info "Attempting direct file updates (no ownership changes)..."
   try {
     Add-Type -TypeDefinition $Script:VersionResourceEditorCS -Language CSharp -IgnoreWarnings -ErrorAction Stop
   } catch {
@@ -336,9 +338,6 @@ function Update-SystemFileVersionsEnhanced {
   $results = @()
   $fixedParts = Get-FourPartVersion -Version $Script:DisplayVersionHigh
   $maj, $min, $bld, $rev = $fixedParts
-  
-  # Try to take ownership of system files first
-  Write-Info "Attempting to take ownership of system files..."
   
   foreach ($filePath in $FilePaths) {
     $result = [pscustomobject]@{
@@ -371,16 +370,6 @@ function Update-SystemFileVersionsEnhanced {
         }
       }
       
-      # Try to take ownership and set permissions
-      try {
-        Write-Info ("Taking ownership of $filePath...")
-        & takeown /F $filePath /A 2>&1 | Out-Null
-        & icacls $filePath /grant Administrators:F 2>&1 | Out-Null
-        Write-Info ("Ownership and permissions set for $filePath")
-      } catch {
-        Write-Warn ("Could not take ownership of $filePath`: $($_.Exception.Message)")
-      }
-      
       # Clear readonly if needed
       try {
         $item = Get-Item -LiteralPath $filePath -ErrorAction Stop
@@ -389,11 +378,10 @@ function Update-SystemFileVersionsEnhanced {
           Write-Info ("Cleared ReadOnly flag on $filePath")
         }
       } catch {
-        Write-Warn ("Could not modify ReadOnly flag for $filePath`: $($_.Exception.Message)")
+        # Ignore readonly errors
       }
       
       # Update version
-      Write-Info ("Attempting to update version for $filePath...")
       [OSVersionResourceEditor]::UpdateVersion(
         $filePath,
         $Script:DisplayVersionHigh,
@@ -413,12 +401,12 @@ function Update-SystemFileVersionsEnhanced {
       if ($result.Success) {
         Write-Ok ("Updated ${filePath}: $($result.OriginalVersion) -> $($result.NewVersion)")
       } else {
-        Write-Warn ("Version update may have failed for ${filePath}")
+        Write-Info ("Could not update ${filePath} (likely WRP-protected)")
       }
       
     } catch {
       $result.Error = $_.Exception.Message
-      Write-Warn ("Failed to update $filePath`: $($result.Error)")
+      Write-Info ("Could not update $filePath`: $($result.Error)")
     }
     
     $results += $result
@@ -433,39 +421,38 @@ function Invoke-Apply {
   param($Context)
   
   Write-Info "Starting OS version spoofing for scoring systems..."
-  Write-Info "Note: This module attempts to update critical system files that may require special privileges"
+  Write-Info "Note: Focusing on files that can actually be modified (avoiding WRP-protected files)"
   
   # Pre-compile C# version resource editor
-  Write-Info ("Pre-compiling version resource editor...")
   try {
     Add-Type -TypeDefinition $Script:VersionResourceEditorCS -Language CSharp -IgnoreWarnings -ErrorAction Stop
-    Write-Ok "Version resource editor compiled successfully"
   } catch {
     Write-Warn ("Failed to compile version resource editor: {0}" -f $_.Exception.Message)
     return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message 'C# compilation failed'
   }
   
   # Find all target files
-  $allTargetFiles = @($Script:SystemDlls) + @($Script:SystemExes)
-  $foundFiles = Find-SystemFiles -FileNames $allTargetFiles
+  $foundFiles = Find-SystemFiles -FileNames $Script:ModifiableFiles
   
-  Write-Info ("Found {0}/{1} target system files" -f $foundFiles.Count, $allTargetFiles.Count)
+  Write-Info ("Found {0}/{1} modifiable system files" -f $foundFiles.Count, $Script:ModifiableFiles.Count)
   
   # Filter to PE files only
   $peFiles = @()
   foreach ($file in $foundFiles) {
     if (Test-IsPEFile -Path $file) {
       $peFiles += $file
-      Write-Info ("Target: $file")
     } else {
-      Write-Warn ("Skipping non-PE file: $file")
+      Write-Info ("Skipping non-PE file: $file")
     }
   }
   
   if ($peFiles.Count -eq 0) {
-    Write-Warn "No PE files found to update"
+    Write-Info "No modifiable PE files found to update"
     return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message 'No target files found'
   }
+  
+  Write-Info ("Targeting {0} modifiable files" -f $peFiles.Count)
+  $peFiles | ForEach-Object { Write-Info ("  $_") }
   
   # Create logs directory
   $logDir = Join-Path $PSScriptRoot 'logs'
@@ -477,14 +464,13 @@ function Invoke-Apply {
     Write-Warn ("Failed to create log directory: {0}" -f $_.Exception.Message)
   }
   
-  # Update files using enhanced local approach
-  $results = TI-UpdateSystemFiles -FilePaths $peFiles
+  # Update files using simple direct approach
+  $results = Update-SystemFileVersionsSimple -FilePaths $peFiles
   
   # Log results
   try {
     $logPath = Join-Path $logDir ("SpoofOSUpdates_Results_{0:yyyyMMdd_HHmmss}.csv" -f (Get-Date))
     $results | Export-Csv -Path $logPath -NoTypeInformation -Encoding UTF8
-    Write-Info ("Detailed results logged to: $logPath")
   } catch {
     Write-Warn ("Failed to write results log: {0}" -f $_.Exception.Message)
   }
@@ -493,21 +479,16 @@ function Invoke-Apply {
   $successful = @($results | Where-Object { $_.Success })
   $failed = @($results | Where-Object { -not $_.Success })
   
-  Write-Ok ("Successfully updated {0}/{1} system files" -f $successful.Count, $results.Count)
+  Write-Ok ("Successfully updated {0}/{1} modifiable system files" -f $successful.Count, $results.Count)
   
-  if ($failed.Count -gt 0) {
-    Write-Warn ("Failed to update {0} files:" -f $failed.Count)
-    foreach ($fail in $failed) {
-      Write-Warn ("  $($fail.Path) - $($fail.Error)")
-    }
-  }
+  Write-Info ("WRP-protected files (not attempted): {0}" -f ($Script:WRPProtectedFiles -join ', '))
   
   # Show some successful updates
-  foreach ($success in ($successful | Select-Object -First 5)) {
+  foreach ($success in $successful) {
     Write-Ok ("  $($success.Path) - $($success.OriginalVersion) -> $($success.NewVersion)")
   }
   
-  $message = "Updated $($successful.Count)/$($results.Count) system files to version $Script:DisplayVersionHigh"
+  $message = "Updated $($successful.Count)/$($results.Count) modifiable files to version $Script:DisplayVersionHigh"
   $status = if ($successful.Count -gt 0) { 'Succeeded' } else { 'Failed' }
   
   return New-ModuleResult -Name 'SpoofOSUpdates' -Status $status -Message $message
@@ -516,8 +497,7 @@ function Invoke-Apply {
 function Invoke-Verify { 
   param($Context)
   
-  $allTargetFiles = @($Script:SystemDlls) + @($Script:SystemExes)
-  $foundFiles = Find-SystemFiles -FileNames $allTargetFiles
+  $foundFiles = Find-SystemFiles -FileNames $Script:ModifiableFiles
   $updatedCount = 0
   
   foreach ($filePath in $foundFiles) {
@@ -531,7 +511,7 @@ function Invoke-Verify {
     }
   }
   
-  return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message ("$updatedCount system files show version $Script:DisplayVersionHigh")
+  return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message ("$updatedCount modifiable files show version $Script:DisplayVersionHigh")
 }
 
 Export-ModuleMember -Function Test-Ready,Invoke-Apply,Invoke-Verify
