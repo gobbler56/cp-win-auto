@@ -251,191 +251,6 @@ function Get-FourPartVersion {
     return ,$nums
 }
 
-function Setup-PowerRun {
-    param([string]$SecurityCode)
-    
-    $currentUser = Get-CurrentUser
-    $desktopPath = [System.IO.Path]::Combine("C:\Users", $currentUser, "Desktop")
-    $powerRunPath = [System.IO.Path]::Combine($desktopPath, "PowerRun.exe")
-    $iniFilePath = [System.IO.Path]::Combine($desktopPath, "PowerRun.ini")
-    
-    Write-Info "Setting up PowerRun on desktop..."
-    
-    # Download PowerRun
-    try {
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Script:PowerRunUrl -OutFile $powerRunPath -ErrorAction Stop
-        Write-Ok "Downloaded PowerRun.exe to desktop"
-    } catch {
-        throw "Failed to download PowerRun: $($_.Exception.Message)"
-    }
-    
-    # Launch PowerRun briefly to generate ini file (same as original script)
-    try {
-        Start-Process -FilePath $powerRunPath -ErrorAction Stop
-        Write-Info "Launched PowerRun to generate ini file..."
-        
-        # Wait for 2 seconds to allow PowerRun to generate the ini file
-        Start-Sleep -Seconds 2
-        
-        # Automatically close PowerRun process after 2 seconds
-        Get-Process -Name "PowerRun" -ErrorAction SilentlyContinue | ForEach-Object { 
-            Stop-Process $_.Id -Force 
-        }
-        Write-Info "Closed PowerRun process"
-    } catch {
-        Write-Warn "PowerRun launch/close failed: $($_.Exception.Message)"
-    }
-    
-    # Check if PowerRun.ini exists and modify it to add the SecurityCode (same as original)
-    if (Test-Path $iniFilePath) {
-        try {
-            $iniContent = Get-Content -Path $iniFilePath
-            $iniContent[13] = "SecurityCode=$SecurityCode"  # Update with the SecurityCode
-            $iniContent | Set-Content -Path $iniFilePath
-            Write-Ok "Updated PowerRun.ini with security code"
-        } catch {
-            throw "Failed to update PowerRun.ini: $($_.Exception.Message)"
-        }
-    } else {
-        throw "PowerRun.ini not found at $iniFilePath"
-    }
-    
-    return @{
-        PowerRunPath = $powerRunPath
-        IniFilePath = $iniFilePath
-        DesktopPath = $desktopPath
-    }
-}
-
-function Create-UpdateScript {
-    param(
-        [string]$DesktopPath,
-        [string[]]$FilePaths
-    )
-    
-    $scriptPath = [System.IO.Path]::Combine($DesktopPath, "update_versions.ps1")
-    
-    # Create file array content for the script
-    $fileArrayContent = ($FilePaths | ForEach-Object { "    `"$_`"" }) -join ",`n"
-    
-    # Create PowerShell script that will run as SYSTEM via PowerRun
-    $scriptContent = @"
-# PowerRun Version Update Script - Running as SYSTEM
-`$ErrorActionPreference = 'Continue'
-
-# Log who we're running as
-Write-Host "Running as: `$(whoami)"
-Write-Host "Process ID: `$PID"
-
-# Compile C# helper
-Add-Type -TypeDefinition @'
-$Script:VersionResourceEditorCS
-'@ -Language CSharp -IgnoreWarnings
-
-# Version info
-`$displayVersion = '$Script:DisplayVersionHigh'
-`$fixedParts = @(65535, 65535, 65535, 65535)
-`$maj, `$min, `$bld, `$rev = `$fixedParts
-
-# File paths to update
-`$files = @(
-$fileArrayContent
-)
-
-`$successCount = 0
-`$totalCount = `$files.Count
-
-Write-Host "Starting version updates for `$totalCount files..."
-
-foreach (`$filePath in `$files) {
-    Write-Host "Processing: `$filePath"
-    
-    try {
-        # Get original version
-        `$originalVersion = "Unknown"
-        try {
-            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
-            `$originalVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
-        } catch { }
-        
-        # Create backup
-        `$backup = "`$filePath.bak"
-        if (-not (Test-Path -LiteralPath `$backup)) {
-            try {
-                Copy-Item -LiteralPath `$filePath -Destination `$backup -ErrorAction Stop
-                Write-Host "  Created backup: `$backup"
-            } catch {
-                Write-Host "  Warning: Could not create backup: `$(`$_.Exception.Message)"
-            }
-        }
-        
-        # Clear readonly if needed
-        try {
-            `$item = Get-Item -LiteralPath `$filePath -ErrorAction Stop
-            if (`$item.IsReadOnly) {
-                `$item.IsReadOnly = `$false
-                Write-Host "  Cleared ReadOnly flag"
-            }
-        } catch { }
-        
-        # Update version
-        [OSVersionResourceEditor]::UpdateVersion(
-            `$filePath,
-            `$displayVersion,
-            [uint16]`$maj, [uint16]`$min, [uint16]`$bld, [uint16]`$rev
-        )
-        
-        # Verify update
-        `$newVersion = "Unknown"
-        try {
-            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
-            `$newVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
-        } catch { }
-        
-        if (`$newVersion -eq `$displayVersion) {
-            Write-Host "  SUCCESS: `$originalVersion -> `$newVersion"
-            `$successCount++
-        } else {
-            Write-Host "  WARNING: Update may have failed (verification shows: `$newVersion)"
-        }
-        
-    } catch {
-        Write-Host "  ERROR: `$(`$_.Exception.Message)"
-    }
-}
-
-Write-Host ""
-Write-Host "Update complete: `$successCount/`$totalCount files successfully updated"
-Write-Host "Script finished at `$(Get-Date)"
-"@
-    
-    # Write script to file
-    $scriptContent | Set-Content -Path $scriptPath -Encoding UTF8
-    Write-Ok "Created update script: $scriptPath"
-    
-    return $scriptPath
-}
-
-function Invoke-PowerRunScript {
-    param(
-        [string]$PowerRunPath,
-        [string]$ScriptPath
-    )
-    
-    Write-Info "Executing version update script via PowerRun as SYSTEM..."
-    
-    # Use PowerRun to run the PowerShell script as NT AUTHORITY\SYSTEM (same pattern as original)
-    $powerRunCommand = "/SW:0 powershell.exe -ExecutionPolicy Bypass -File `"$ScriptPath`""
-    
-    try {
-        Start-Process -FilePath $PowerRunPath -ArgumentList $powerRunCommand -Wait -ErrorAction Stop
-        Write-Ok "PowerRun execution completed"
-    } catch {
-        throw "PowerRun execution failed: $($_.Exception.Message)"
-    }
-}
-
 function Test-Ready { param($Context) return $true }
 
 function Invoke-Apply { 
@@ -468,23 +283,193 @@ function Invoke-Apply {
     Write-Info ("Found {0}/{1} target files:" -f $peFiles.Count, $Script:TargetFiles.Count)
     $peFiles | ForEach-Object { Write-Info "  $_" }
     
+    # Follow the EXACT pattern from the primitive script
     try {
-        # Setup PowerRun (download, configure ini)
-        $powerRunInfo = Setup-PowerRun -SecurityCode $securityCode
+        # Get the current user using the specified command (EXACTLY like primitive script)
+        $currentUser = Get-CurrentUser
         
-        # Create the version update PowerShell script
-        $scriptInfo = Create-UpdateScript -DesktopPath $powerRunInfo.DesktopPath -FilePaths $peFiles
+        # Define paths (EXACTLY like primitive script)
+        $desktopPath = [System.IO.Path]::Combine("C:\Users", $currentUser, "Desktop")
+        $powerRunPath = [System.IO.Path]::Combine($desktopPath, "PowerRun.exe")
+        $iniFilePath = [System.IO.Path]::Combine($desktopPath, "PowerRun.ini")
         
-        # Execute the script via PowerRun as SYSTEM
-        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptPath $scriptInfo
+        Write-Info "Setting up PowerRun on desktop..."
         
-        # Clean up
+        # Disable the progress bar for faster download with Invoke-WebRequest (EXACTLY like primitive script)
+        $ProgressPreference = 'SilentlyContinue'
+        
+        # Download PowerRun (EXACTLY like primitive script)
+        Invoke-WebRequest -Uri $Script:PowerRunUrl -OutFile $powerRunPath
+        Write-Ok "Downloaded PowerRun.exe to desktop"
+        
+        # Launch PowerRun so it generates the PowerRun.ini file (EXACTLY like primitive script)
+        Start-Process -FilePath $powerRunPath
+        Write-Info "Launched PowerRun to generate ini file..."
+        
+        # Wait for 2 seconds to allow PowerRun to generate the ini file (EXACTLY like primitive script)
+        Start-Sleep -Seconds 2
+        
+        # Automatically close PowerRun process after 2 seconds (EXACTLY like primitive script)
+        Get-Process -Name "PowerRun" -ErrorAction SilentlyContinue | ForEach-Object { 
+            Stop-Process $_.Id -Force 
+        }
+        Write-Info "Closed PowerRun process"
+        
+        # Check if PowerRun.ini exists and modify it to add the SecurityCode (EXACTLY like primitive script)
+        if (Test-Path $iniFilePath) {
+            $iniContent = Get-Content -Path $iniFilePath
+            $iniContent[13] = "SecurityCode=$securityCode"  # Update with the SecurityCode (EXACTLY line 13 like primitive script)
+            $iniContent | Set-Content -Path $iniFilePath
+            Write-Ok "Updated PowerRun.ini with security code"
+        } else {
+            throw "PowerRun.ini not found at $iniFilePath"
+        }
+        
+        # Create the PowerShell script (like how primitive script creates batch file)
+        $scriptPath = [System.IO.Path]::Combine($desktopPath, "update_versions.ps1")
+        
+        # Build the PowerShell script content (combining C# and update logic)
+        $scriptContent = @"
+# PowerRun Version Update Script - Running as SYSTEM
+`$ErrorActionPreference = 'Continue'
+
+# Log who we're running as and create transcript
+`$logPath = "C:\Windows\Temp\PowerRun_VersionUpdate_`$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+Start-Transcript -Path `$logPath -Force
+
+Write-Host "Running as: `$(whoami)"
+Write-Host "Process ID: `$PID"
+Write-Host "Starting version update process at `$(Get-Date)"
+
+# Test C# compilation first
+Write-Host "Compiling C# version resource editor..."
+try {
+    Add-Type -TypeDefinition @'
+$Script:VersionResourceEditorCS
+'@ -Language CSharp -IgnoreWarnings -ErrorAction Stop
+    Write-Host "C# compilation successful"
+} catch {
+    Write-Host "C# compilation failed: `$(`$_.Exception.Message)"
+    Stop-Transcript
+    exit 1
+}
+
+# Version info
+`$displayVersion = '$Script:DisplayVersionHigh'
+`$fixedParts = @(65535, 65535, 65535, 65535)
+`$maj, `$min, `$bld, `$rev = `$fixedParts
+
+# File paths to update
+`$files = @(
+$($peFiles | ForEach-Object { "    '$_'" } | Out-String)
+)
+
+`$successCount = 0
+`$totalCount = `$files.Count
+
+Write-Host "Starting version updates for `$totalCount files..."
+
+foreach (`$filePath in `$files) {
+    Write-Host "Processing: `$filePath"
+    
+    if (-not (Test-Path -LiteralPath `$filePath)) {
+        Write-Host "  File not found, skipping"
+        continue
+    }
+    
+    try {
+        # Get original version
+        `$originalVersion = "Unknown"
         try {
-            Remove-Item -Path $scriptInfo -Force -ErrorAction SilentlyContinue
-            Write-Info "Cleaned up temporary script"
-        } catch { }
+            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
+            `$originalVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
+        } catch { 
+            `$originalVersion = "Could not read version"
+        }
         
-        return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message "PowerRun execution completed for $($peFiles.Count) files"
+        Write-Host "  Original version: `$originalVersion"
+        
+        # Create backup
+        `$backup = "`$filePath.bak"
+        if (-not (Test-Path -LiteralPath `$backup)) {
+            try {
+                Copy-Item -LiteralPath `$filePath -Destination `$backup -ErrorAction Stop
+                Write-Host "  Created backup: `$backup"
+            } catch {
+                Write-Host "  Warning: Could not create backup: `$(`$_.Exception.Message)"
+            }
+        } else {
+            Write-Host "  Backup already exists: `$backup"
+        }
+        
+        # Clear readonly if needed
+        try {
+            `$item = Get-Item -LiteralPath `$filePath -ErrorAction Stop
+            if (`$item.IsReadOnly) {
+                `$item.IsReadOnly = `$false
+                Write-Host "  Cleared ReadOnly flag"
+            }
+        } catch {
+            Write-Host "  Could not check/clear ReadOnly: `$(`$_.Exception.Message)"
+        }
+        
+        # Update version
+        Write-Host "  Attempting version update..."
+        [OSVersionResourceEditor]::UpdateVersion(
+            `$filePath,
+            `$displayVersion,
+            [uint16]`$maj, [uint16]`$min, [uint16]`$bld, [uint16]`$rev
+        )
+        
+        # Verify update
+        `$newVersion = "Unknown"
+        try {
+            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
+            `$newVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
+        } catch {
+            `$newVersion = "Could not read new version"
+        }
+        
+        Write-Host "  New version: `$newVersion"
+        
+        if (`$newVersion -eq `$displayVersion) {
+            Write-Host "  SUCCESS: `$originalVersion -> `$newVersion"
+            `$successCount++
+        } else {
+            Write-Host "  WARNING: Update may have failed (verification shows: `$newVersion)"
+        }
+        
+    } catch {
+        Write-Host "  ERROR: `$(`$_.Exception.Message)"
+        Write-Host "  Full exception: `$(`$_.Exception.ToString())"
+    }
+    Write-Host ""
+}
+
+Write-Host "Update complete: `$successCount/`$totalCount files successfully updated"
+Write-Host "Script finished at `$(Get-Date)"
+Write-Host "Log saved to: `$logPath"
+
+Stop-Transcript
+"@
+        
+        # Write script to file
+        $scriptContent | Set-Content -Path $scriptPath -Encoding UTF8
+        Write-Ok "Created update script: $scriptPath"
+        
+        # Use PowerRun to run the PowerShell script as NT AUTHORITY\SYSTEM (EXACTLY like primitive script pattern)
+        $powerRunCommand = "/SW:0 powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`""
+        Write-Info "Executing version update script via PowerRun as SYSTEM..."
+        Write-Info "Command: PowerRun.exe $powerRunCommand"
+        
+        Start-Process -FilePath $powerRunPath -ArgumentList $powerRunCommand -Wait
+        Write-Ok "PowerRun execution completed"
+        
+        # Don't clean up immediately - let user inspect the script
+        Write-Info "Update script saved at: $scriptPath"
+        Write-Info "Check C:\Windows\Temp\ for PowerRun log files"
+        
+        return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message "PowerRun execution completed for $($peFiles.Count) files. Check logs for details."
         
     } catch {
         return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message $_.Exception.Message
