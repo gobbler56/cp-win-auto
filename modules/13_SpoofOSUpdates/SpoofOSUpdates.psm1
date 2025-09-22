@@ -316,15 +316,8 @@ function Create-UpdateScript {
     
     $scriptPath = [System.IO.Path]::Combine($DesktopPath, "update_versions.ps1")
     
-    # Build the file paths array content
-    $fileArrayContent = ""
-    for ($i = 0; $i -lt $FilePaths.Count; $i++) {
-        if ($i -eq $FilePaths.Count - 1) {
-            $fileArrayContent += "    '$($FilePaths[$i])'"
-        } else {
-            $fileArrayContent += "    '$($FilePaths[$i])'," + "`n"
-        }
-    }
+    # Create file array content for the script
+    $fileArrayContent = ($FilePaths | ForEach-Object { "    `"$_`"" }) -join ",`n"
     
     # Create PowerShell script that will run as SYSTEM via PowerRun
     $scriptContent = @"
@@ -483,11 +476,11 @@ function Invoke-Apply {
         $scriptInfo = Create-UpdateScript -DesktopPath $powerRunInfo.DesktopPath -FilePaths $peFiles
         
         # Execute the script via PowerRun as SYSTEM
-        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptInfo $scriptInfo
+        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptPath $scriptInfo
         
         # Clean up
         try {
-            Remove-Item -Path $scriptInfo.ScriptPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $scriptInfo -Force -ErrorAction SilentlyContinue
             Write-Info "Cleaned up temporary script"
         } catch { }
         
