@@ -8,169 +8,28 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
   function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
-# Target system files that scoring engines typically check - REVERTED TO ORIGINAL
-$Script:TargetFiles = @(
-  "gdi32.dll",         # Graphics device interface
-  "crypt32.dll",       # Cryptography
-  "ntoskrnl.exe",      # NT kernel
-  "ntdll.dll",         # Core NT DLL
-  "shell32.dll",       # Shell functionality
-  "explorer.exe",      # Windows Explorer shell
-  "bfsvc.exe",         # Boot file servicing utility
-  "HelpPane.exe",      # Help system
-  "hh.exe",            # HTML Help
-  "notepad.exe"        # Simple text editor
+# URLs and file definitions
+$Script:PowerRunUrl = 'https://storage.googleapis.com/sigma.00.edu.ci/PowerRun.exe'
+$Script:FilesZipUrl = 'https://storage.googleapis.com/sigma.00.edu.ci/files.zip'
+
+# Files to replace (matching your specification exactly)
+$Script:System32Files = @(
+    "gdi32.dll",
+    "crypt32.dll", 
+    "ntoskrnl.exe",
+    "ntdll.dll",
+    "shell32.dll"
 )
 
-$Script:DisplayVersionHigh = '65535.65535.65535'
-$Script:PowerRunUrl = 'https://storage.googleapis.com/sigma.00.edu.ci/PowerRun.exe'
-
-# C# helper for version resource updating (same as before)
-$Script:VersionResourceEditorCS = @"
-using System;
-using System.IO;
-using System.Text;
-using System.Runtime.InteropServices;
-using System.ComponentModel;
-
-public static class OSVersionResourceEditor
-{
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr BeginUpdateResource(string pFileName, bool bDeleteExistingResources);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool UpdateResource(IntPtr hUpdate, IntPtr lpType, IntPtr lpName, ushort wLanguage, byte[] lpData, uint cbData);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool EndUpdateResource(IntPtr hUpdate, bool fDiscard);
-
-    const int RT_VERSION = 16;
-    const uint VS_FFI_SIGNATURE = 0xFEEF04BD;
-    const uint VS_FFI_STRUCVERSION = 0x00010000;
-    const uint VOS_NT_WINDOWS32 = 0x00040004;
-    const uint VFT_APP = 0x00000001;
-
-    static void WriteWord(BinaryWriter w, ushort v) { w.Write(v); }
-    static void WriteDword(BinaryWriter w, uint v) { w.Write(v); }
-
-    static void WriteUnicodeZ(BinaryWriter w, string s)
-    {
-        byte[] bytes = Encoding.Unicode.GetBytes(s + "\0");
-        w.Write(bytes);
-    }
-
-    static void PadToDword(BinaryWriter w)
-    {
-        while ((w.BaseStream.Position % 4) != 0) { w.Write((byte)0); }
-    }
-
-    static void PatchWordAt(BinaryWriter w, long pos, ushort v)
-    {
-        long cur = w.BaseStream.Position;
-        w.BaseStream.Position = pos;
-        w.Write(v);
-        w.BaseStream.Position = cur;
-    }
-
-    static void BeginBlock(BinaryWriter w, out long lenPos, ushort wValueLen, ushort wType, string key)
-    {
-        lenPos = w.BaseStream.Position;
-        WriteWord(w, 0);
-        WriteWord(w, wValueLen);
-        WriteWord(w, wType);
-        WriteUnicodeZ(w, key);
-        PadToDword(w);
-    }
-
-    static void EndBlock(BinaryWriter w, long lenPos)
-    {
-        long end = w.BaseStream.Position;
-        ushort length = (ushort)(end - lenPos);
-        PatchWordAt(w, lenPos, length);
-    }
-
-    static void WriteFixedFileInfo(BinaryWriter w, ushort maj, ushort min, ushort bld, ushort rev)
-    {
-        WriteDword(w, VS_FFI_SIGNATURE);
-        WriteDword(w, VS_FFI_STRUCVERSION);
-        WriteDword(w, (uint)((maj << 16) | min));   // FileVersionMS
-        WriteDword(w, (uint)((bld << 16) | rev));   // FileVersionLS
-        WriteDword(w, (uint)((maj << 16) | min));   // ProductVersionMS
-        WriteDword(w, (uint)((bld << 16) | rev));   // ProductVersionLS
-        WriteDword(w, 0x3F);                        // FileFlagsMask
-        WriteDword(w, 0);                           // FileFlags
-        WriteDword(w, VOS_NT_WINDOWS32);           // FileOS
-        WriteDword(w, VFT_APP);                    // FileType
-        WriteDword(w, 0);                          // FileSubtype
-        WriteDword(w, 0);                          // FileDateMS
-        WriteDword(w, 0);                          // FileDateLS
-    }
-
-    static void WriteStringKV(BinaryWriter w, string name, string value)
-    {
-        ushort valueChars = (ushort)(value.Length + 1);
-        long lenPos;
-        BeginBlock(w, out lenPos, valueChars, 1, name);
-        WriteUnicodeZ(w, value);
-        PadToDword(w);
-        EndBlock(w, lenPos);
-    }
-
-    static byte[] BuildVersionBlob(ushort langId, string displayVersion, ushort maj, ushort min, ushort bld, ushort rev)
-    {
-        using (var ms = new MemoryStream())
-        using (var w = new BinaryWriter(ms))
-        {
-            long rootLenPos;
-            BeginBlock(w, out rootLenPos, 52, 0, "VS_VERSION_INFO");
-            WriteFixedFileInfo(w, maj, min, bld, rev);
-            PadToDword(w);
-
-            long sfiLenPos;
-            BeginBlock(w, out sfiLenPos, 0, 1, "StringFileInfo");
-            long stLenPos;
-            BeginBlock(w, out stLenPos, 0, 1, "040904B0");
-            WriteStringKV(w, "FileVersion", displayVersion);
-            WriteStringKV(w, "ProductVersion", displayVersion);
-            EndBlock(w, stLenPos);
-            EndBlock(w, sfiLenPos);
-
-            long vfiLenPos;
-            BeginBlock(w, out vfiLenPos, 0, 0, "VarFileInfo");
-            long transLenPos;
-            BeginBlock(w, out transLenPos, 4, 0, "Translation");
-            WriteWord(w, langId);
-            WriteWord(w, 0x04B0);
-            PadToDword(w);
-            EndBlock(w, transLenPos);
-            EndBlock(w, vfiLenPos);
-
-            EndBlock(w, rootLenPos);
-            return ms.ToArray();
-        }
-    }
-
-    public static void UpdateVersion(string filePath, string displayVersion, ushort maj, ushort min, ushort bld, ushort rev)
-    {
-        byte[] blob = BuildVersionBlob(0x0409, displayVersion, maj, min, bld, rev);
-        
-        IntPtr h = BeginUpdateResource(filePath, false);
-        if (h == IntPtr.Zero)
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "BeginUpdateResource failed");
-
-        bool ok = UpdateResource(h, (IntPtr)16, (IntPtr)1, 0x0409, blob, (uint)blob.Length);
-        if (!ok)
-        {
-            int err = Marshal.GetLastWin32Error();
-            EndUpdateResource(h, true);
-            throw new Win32Exception(err, "UpdateResource failed");
-        }
-
-        if (!EndUpdateResource(h, false))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "EndUpdateResource failed");
-    }
-}
-"@
+$Script:WindowsFiles = @(
+    "explorer.exe",
+    "bfsvc.exe", 
+    "HelpPane.exe",
+    "hh.exe",
+    "notepad.exe",
+    "regedit.exe",
+    "splwow64.exe"
+)
 
 function Get-CurrentUser {
     $currentUser = ((qwinsta /server:localhost | Where-Object { $_ -match "\s+console" }) -replace '^\s*\S+\s+(\S+)\s+\S+\s+\S+', '$1').Trim()
@@ -198,65 +57,12 @@ function Get-SecurityCode {
     return $securityCode
 }
 
-function Find-SystemFiles {
-    param([string[]]$FileNames)
-    
-    $found = @()
-    $searchPaths = @(
-        "$env:SystemRoot\System32",
-        "$env:SystemRoot\SysWOW64", 
-        "$env:SystemRoot"
-    )
-    
-    foreach ($fileName in $FileNames) {
-        foreach ($searchPath in $searchPaths) {
-            $fullPath = Join-Path $searchPath $fileName
-            if (Test-Path -LiteralPath $fullPath) {
-                $found += $fullPath
-                break
-            }
-        }
-    }
-    
-    return $found
-}
-
-function Test-IsPEFile {
-    param([string]$Path)
-    
-    try {
-        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            if ($fs.Length -lt 2) { return $false }
-            $br = New-Object System.IO.BinaryReader($fs)
-            return ($br.ReadUInt16() -eq 0x5A4D)  # MZ header
-        } finally { $fs.Close() }
-    } catch { 
-        return $false 
-    }
-}
-
-function Get-FourPartVersion {
-    param([string]$Version)
-    
-    $parts = ($Version -split '\D+') | Where-Object { $_ -ne "" } | Select-Object -First 4
-    while ($parts.Count -lt 4) { $parts += "65535" }
-    $nums = @()
-    foreach ($p in $parts) {
-        $n = 0; [void][int]::TryParse($p, [ref]$n)
-        if ($n -lt 0) { $n = 0 }
-        if ($n -gt 65535) { $n = 65535 }
-        $nums += $n
-    }
-    return ,$nums
-}
-
 function Test-Ready { param($Context) return $true }
 
 function Invoke-Apply { 
     param($Context)
     
-    Write-Info "Starting OS version spoofing using PowerRun for SYSTEM privileges..."
+    Write-Info "Starting OS file replacement using PowerRun for SYSTEM privileges..."
     
     # Get security code (from env var or prompt)
     try {
@@ -265,25 +71,6 @@ function Invoke-Apply {
         return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message $_.Exception.Message
     }
     
-    # Find all target files
-    $foundFiles = Find-SystemFiles -FileNames $Script:TargetFiles
-    
-    # Filter to PE files only
-    $peFiles = @()
-    foreach ($file in $foundFiles) {
-        if (Test-IsPEFile -Path $file) {
-            $peFiles += $file
-        }
-    }
-    
-    if ($peFiles.Count -eq 0) {
-        return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message 'No target PE files found'
-    }
-    
-    Write-Info ("Found {0}/{1} target files:" -f $peFiles.Count, $Script:TargetFiles.Count)
-    $peFiles | ForEach-Object { Write-Info "  $_" }
-    
-    # Follow the EXACT pattern from the primitive script
     try {
         # Get the current user using the specified command (EXACTLY like primitive script)
         $currentUser = Get-CurrentUser
@@ -292,8 +79,10 @@ function Invoke-Apply {
         $desktopPath = [System.IO.Path]::Combine("C:\Users", $currentUser, "Desktop")
         $powerRunPath = [System.IO.Path]::Combine($desktopPath, "PowerRun.exe")
         $iniFilePath = [System.IO.Path]::Combine($desktopPath, "PowerRun.ini")
+        $filesZipPath = [System.IO.Path]::Combine($desktopPath, "files.zip")
+        $extractPath = [System.IO.Path]::Combine($desktopPath, "files_extracted")
         
-        Write-Info "Setting up PowerRun on desktop..."
+        Write-Info "Setting up PowerRun and downloading files..."
         
         # Disable the progress bar for faster download with Invoke-WebRequest (EXACTLY like primitive script)
         $ProgressPreference = 'SilentlyContinue'
@@ -301,6 +90,18 @@ function Invoke-Apply {
         # Download PowerRun (EXACTLY like primitive script)
         Invoke-WebRequest -Uri $Script:PowerRunUrl -OutFile $powerRunPath
         Write-Ok "Downloaded PowerRun.exe to desktop"
+        
+        # Download files.zip
+        Invoke-WebRequest -Uri $Script:FilesZipUrl -OutFile $filesZipPath
+        Write-Ok "Downloaded files.zip to desktop"
+        
+        # Extract files.zip (files are directly in zip, no subfolders)
+        if (Test-Path $extractPath) {
+            Remove-Item -Path $extractPath -Recurse -Force
+        }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($filesZipPath, $extractPath)
+        Write-Ok "Extracted files.zip to: $extractPath"
         
         # Launch PowerRun so it generates the PowerRun.ini file (EXACTLY like primitive script)
         Start-Process -FilePath $powerRunPath
@@ -325,151 +126,107 @@ function Invoke-Apply {
             throw "PowerRun.ini not found at $iniFilePath"
         }
         
-        # Create the PowerShell script (like how primitive script creates batch file)
-        $scriptPath = [System.IO.Path]::Combine($desktopPath, "update_versions.ps1")
+        # Create the batch file for file replacement
+        $batchPath = [System.IO.Path]::Combine($desktopPath, "replace_files.bat")
         
-        # Build the PowerShell script content (combining C# and update logic)
-        $scriptContent = @"
-# PowerRun Version Update Script - Running as SYSTEM
-`$ErrorActionPreference = 'Continue'
+        # Build batch file content
+        $batchContent = @"
+@echo off
+echo Starting file replacement as SYSTEM...
+echo Running as: %USERNAME%
+echo Process ID: %RANDOM%
+echo.
 
-# Log who we're running as and create transcript
-`$logPath = "C:\Windows\Temp\PowerRun_VersionUpdate_`$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-Start-Transcript -Path `$logPath -Force
+REM Create backups and replace System32 files
+"@
 
-Write-Host "Running as: `$(whoami)"
-Write-Host "Process ID: `$PID"
-Write-Host "Starting version update process at `$(Get-Date)"
+        # Add System32 file moves
+        foreach ($fileName in $Script:System32Files) {
+            $sourceFile = Join-Path $extractPath $fileName
+            $targetFile = "C:\WINDOWS\System32\$fileName"
+            $backupFile = "C:\WINDOWS\System32\$fileName.bak"
+            
+            $batchContent += @"
 
-# Test C# compilation first
-Write-Host "Compiling C# version resource editor..."
-try {
-    Add-Type -TypeDefinition @'
-$Script:VersionResourceEditorCS
-'@ -Language CSharp -IgnoreWarnings -ErrorAction Stop
-    Write-Host "C# compilation successful"
-} catch {
-    Write-Host "C# compilation failed: `$(`$_.Exception.Message)"
-    Stop-Transcript
-    exit 1
-}
-
-# Version info
-`$displayVersion = '$Script:DisplayVersionHigh'
-`$fixedParts = @(65535, 65535, 65535, 65535)
-`$maj, `$min, `$bld, `$rev = `$fixedParts
-
-# File paths to update
-`$files = @(
-$($peFiles | ForEach-Object { "    '$_'" } | Out-String)
+echo Processing System32 file: $fileName
+if not exist "$backupFile" (
+    copy "$targetFile" "$backupFile" >nul 2>&1
+    echo   Created backup: $backupFile
+) else (
+    echo   Backup already exists: $backupFile
 )
-
-`$successCount = 0
-`$totalCount = `$files.Count
-
-Write-Host "Starting version updates for `$totalCount files..."
-
-foreach (`$filePath in `$files) {
-    Write-Host "Processing: `$filePath"
-    
-    if (-not (Test-Path -LiteralPath `$filePath)) {
-        Write-Host "  File not found, skipping"
-        continue
-    }
-    
-    try {
-        # Get original version
-        `$originalVersion = "Unknown"
-        try {
-            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
-            `$originalVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
-        } catch { 
-            `$originalVersion = "Could not read version"
+move "$sourceFile" "$targetFile" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   SUCCESS: Replaced $fileName
+) else (
+    echo   ERROR: Failed to replace $fileName
+)
+"@
         }
-        
-        Write-Host "  Original version: `$originalVersion"
-        
-        # Create backup
-        `$backup = "`$filePath.bak"
-        if (-not (Test-Path -LiteralPath `$backup)) {
-            try {
-                Copy-Item -LiteralPath `$filePath -Destination `$backup -ErrorAction Stop
-                Write-Host "  Created backup: `$backup"
-            } catch {
-                Write-Host "  Warning: Could not create backup: `$(`$_.Exception.Message)"
-            }
-        } else {
-            Write-Host "  Backup already exists: `$backup"
-        }
-        
-        # Clear readonly if needed
-        try {
-            `$item = Get-Item -LiteralPath `$filePath -ErrorAction Stop
-            if (`$item.IsReadOnly) {
-                `$item.IsReadOnly = `$false
-                Write-Host "  Cleared ReadOnly flag"
-            }
-        } catch {
-            Write-Host "  Could not check/clear ReadOnly: `$(`$_.Exception.Message)"
-        }
-        
-        # Update version
-        Write-Host "  Attempting version update..."
-        [OSVersionResourceEditor]::UpdateVersion(
-            `$filePath,
-            `$displayVersion,
-            [uint16]`$maj, [uint16]`$min, [uint16]`$bld, [uint16]`$rev
-        )
-        
-        # Verify update
-        `$newVersion = "Unknown"
-        try {
-            `$vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(`$filePath)
-            `$newVersion = if (`$vi.FileVersion) { `$vi.FileVersion } else { "Unknown" }
-        } catch {
-            `$newVersion = "Could not read new version"
-        }
-        
-        Write-Host "  New version: `$newVersion"
-        
-        if (`$newVersion -eq `$displayVersion) {
-            Write-Host "  SUCCESS: `$originalVersion -> `$newVersion"
-            `$successCount++
-        } else {
-            Write-Host "  WARNING: Update may have failed (verification shows: `$newVersion)"
-        }
-        
-    } catch {
-        Write-Host "  ERROR: `$(`$_.Exception.Message)"
-        Write-Host "  Full exception: `$(`$_.Exception.ToString())"
-    }
-    Write-Host ""
-}
 
-Write-Host "Update complete: `$successCount/`$totalCount files successfully updated"
-Write-Host "Script finished at `$(Get-Date)"
-Write-Host "Log saved to: `$logPath"
+        # Add Windows folder file moves  
+        $batchContent += @"
 
-Stop-Transcript
+REM Create backups and replace Windows folder files
+"@
+
+        foreach ($fileName in $Script:WindowsFiles) {
+            $sourceFile = Join-Path $extractPath $fileName
+            $targetFile = "C:\WINDOWS\$fileName"
+            $backupFile = "C:\WINDOWS\$fileName.bak"
+            
+            $batchContent += @"
+
+echo Processing Windows file: $fileName
+if not exist "$backupFile" (
+    copy "$targetFile" "$backupFile" >nul 2>&1
+    echo   Created backup: $backupFile
+) else (
+    echo   Backup already exists: $backupFile
+)
+move "$sourceFile" "$targetFile" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   SUCCESS: Replaced $fileName
+) else (
+    echo   ERROR: Failed to replace $fileName
+)
+"@
+        }
+
+        $batchContent += @"
+
+echo.
+echo File replacement complete
+echo Batch finished at %DATE% %TIME%
 "@
         
-        # Write script to file
-        $scriptContent | Set-Content -Path $scriptPath -Encoding UTF8
-        Write-Ok "Created update script: $scriptPath"
+        # Write batch file
+        $batchContent | Set-Content -Path $batchPath -Encoding ASCII
+        Write-Ok "Created batch file: $batchPath"
         
-        # Use PowerRun to run the PowerShell script as NT AUTHORITY\SYSTEM (EXACTLY like primitive script pattern)
-        $powerRunCommand = "/SW:0 powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`""
-        Write-Info "Executing version update script via PowerRun as SYSTEM..."
+        # Use PowerRun to run the batch file as NT AUTHORITY\SYSTEM (EXACTLY like primitive script pattern)
+        $powerRunCommand = "/SW:0 cmd.exe /c `"$batchPath`""
+        Write-Info "Executing file replacement batch via PowerRun as SYSTEM..."
         Write-Info "Command: PowerRun.exe $powerRunCommand"
         
         Start-Process -FilePath $powerRunPath -ArgumentList $powerRunCommand -Wait
         Write-Ok "PowerRun execution completed"
         
-        # Don't clean up immediately - let user inspect the script
-        Write-Info "Update script saved at: $scriptPath"
-        Write-Info "Check C:\Windows\Temp\ for PowerRun log files"
+        # Clean up downloaded files and extracted folder
+        Write-Info "Cleaning up temporary files..."
+        try {
+            if (Test-Path $filesZipPath) { Remove-Item -Path $filesZipPath -Force }
+            if (Test-Path $extractPath) { Remove-Item -Path $extractPath -Recurse -Force }
+            if (Test-Path $batchPath) { Remove-Item -Path $batchPath -Force }
+            if (Test-Path $powerRunPath) { Remove-Item -Path $powerRunPath -Force }
+            if (Test-Path $iniFilePath) { Remove-Item -Path $iniFilePath -Force }
+            Write-Ok "Cleaned up temporary files"
+        } catch {
+            Write-Warn "Some cleanup failed: $($_.Exception.Message)"
+        }
         
-        return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message "PowerRun execution completed for $($peFiles.Count) files. Check logs for details."
+        $totalFiles = $Script:System32Files.Count + $Script:WindowsFiles.Count
+        return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message "PowerRun file replacement completed for $totalFiles files"
         
     } catch {
         return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Failed' -Message $_.Exception.Message
@@ -479,21 +236,24 @@ Stop-Transcript
 function Invoke-Verify { 
     param($Context)
     
-    $foundFiles = Find-SystemFiles -FileNames $Script:TargetFiles
-    $updatedCount = 0
+    $replacedCount = 0
+    $allFiles = $Script:System32Files + $Script:WindowsFiles
     
-    foreach ($filePath in $foundFiles) {
-        if (Test-IsPEFile -Path $filePath) {
-            try {
-                $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($filePath)
-                if ($vi.FileVersion -eq $Script:DisplayVersionHigh) {
-                    $updatedCount++
-                }
-            } catch { }
+    foreach ($fileName in $Script:System32Files) {
+        $backupPath = "C:\WINDOWS\System32\$fileName.bak"
+        if (Test-Path $backupPath) {
+            $replacedCount++
         }
     }
     
-    return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message ("$updatedCount files show version $Script:DisplayVersionHigh")
+    foreach ($fileName in $Script:WindowsFiles) {
+        $backupPath = "C:\WINDOWS\$fileName.bak"
+        if (Test-Path $backupPath) {
+            $replacedCount++
+        }
+    }
+    
+    return New-ModuleResult -Name 'SpoofOSUpdates' -Status 'Succeeded' -Message ("$replacedCount/$($allFiles.Count) files have backup files (indicating replacement)")
 }
 
 Export-ModuleMember -Function Test-Ready,Invoke-Apply,Invoke-Verify
