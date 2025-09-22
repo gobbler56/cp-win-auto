@@ -1,4 +1,4 @@
-# cp-win-auto — Windows Automation Runner (CyberPatriot Edition)
+# cp-win-auto — Windows Automation Runner
 
 Automated, modular hardening for **Windows 11 / Server 2019 / Server 2022** images used in CyberPatriot.  
 
