@@ -19,9 +19,7 @@ $Script:TargetFiles = @(
   "bfsvc.exe",         # Boot file servicing utility
   "HelpPane.exe",      # Help system
   "hh.exe",            # HTML Help
-  "notepad.exe",       # Simple text editor
-  "regedit.exe",       # Registry editor
-  "splwow64.exe"       # Print spooler
+  "notepad.exe"        # Simple text editor
 )
 
 $Script:DisplayVersionHigh = '65535.65535.65535'
@@ -339,7 +337,13 @@ $Script:VersionResourceEditorCS
 
 # File paths to update
 `$files = @(
-$($FilePaths | ForEach-Object { "    '$_'," } | ForEach-Object { $_.TrimEnd(',') } | Select-Object -Last 1; $FilePaths | Select-Object -SkipLast 1 | ForEach-Object { "    '$_'," })
+$(for ($i = 0; $i -lt $FilePaths.Count; $i++) {
+    if ($i -eq $FilePaths.Count - 1) {
+        "    '$($FilePaths[$i])'"
+    } else {
+        "    '$($FilePaths[$i])',"  
+    }
+} | Out-String).Trim()
 )
 
 `$successCount = 0
