@@ -472,14 +472,14 @@ function Invoke-Apply {
         $powerRunInfo = Setup-PowerRun -SecurityCode $securityCode
         
         # Create the version update PowerShell script
-        $scriptPath = Create-UpdateScript -DesktopPath $powerRunInfo.DesktopPath -FilePaths $peFiles
+        $scriptInfo = Create-UpdateScript -DesktopPath $powerRunInfo.DesktopPath -FilePaths $peFiles
         
         # Execute the script via PowerRun as SYSTEM
-        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptPath $scriptPath
+        Invoke-PowerRunScript -PowerRunPath $powerRunInfo.PowerRunPath -ScriptInfo $scriptInfo
         
         # Clean up
         try {
-            Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $scriptInfo.ScriptPath -Force -ErrorAction SilentlyContinue
             Write-Info "Cleaned up temporary script"
         } catch { }
         
