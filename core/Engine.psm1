@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Import-Module -Force -DisableNameChecking (Join-Path $here 'Utils.psm1')
@@ -78,7 +78,7 @@ function Get-Modules {
       $out += [pscustomobject]@{ Name=$name; Category=$catDir.Name; Path=$psm1.FullName; Priority=$prio; Meta=$meta }
     }
   }
-  $out | Sort-Object Priority, Category, Name
+  @($out | Sort-Object Priority, Category, Name)
 }
 
 function Select-ModulesByName {

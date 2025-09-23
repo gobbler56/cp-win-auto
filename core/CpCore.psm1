@@ -89,7 +89,7 @@ function __CP_SelectModules {
   $Modules = @($Modules)
   if ($Include) { $Include = @($Include) } else { $Include = @() }
   if ($Exclude) { $Exclude = @($Exclude) } else { $Exclude = @() }
-  if ($Include.Count -gt 0) {
+  if (@($Include).Count -gt 0) {
     $wanted = @()
     foreach ($pat in $Include) {
       $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
@@ -97,7 +97,7 @@ function __CP_SelectModules {
     }
     $Modules = @($wanted | Select-Object -Unique)
   }
-  if ($Exclude.Count -gt 0) {
+  if (@($Exclude).Count -gt 0) {
     foreach ($pat in $Exclude) {
       $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
       $Modules = @($Modules | Where-Object { $_.Name -notmatch $rx -and $_.Category -notmatch $rx })
@@ -125,7 +125,7 @@ function Invoke-CpAutoCore {
   # Build context and get modules ONCE (outside of interactive loop)
   $ctx  = __CP_BuildContext -Root $Root
   $mods = @(__CP_GetModules -Root $Root)
-  if (-not $mods -or $mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
+  if (-not $mods -or @($mods).Count -eq 0) { throw "No modules discovered under $Root\modules" }
 
   if ($Interactive) {
     # Interactive loop - context and modules are already built
@@ -144,7 +144,7 @@ function Invoke-CpAutoCore {
           if ($t -match '^\d+$') {
             $idx = [int]$t
             if ($idx -ge 1 -and $idx -le $mods.Count) { $include += $mods[$idx-1].Name }
-          } else {
+          if ($idx -ge 1 -and $idx -le @($mods).Count) { $include += @($mods)[$idx-1].Name }
             $include += $t
           }
         }
@@ -166,12 +166,12 @@ function Invoke-CpAutoCore {
       
     } while ($runAnother)
     
-    Write-Ok "Interactive session complete"
+    if (@($selectedMods).Count -eq 0) { 
     return
   } else {
     # Non-interactive mode
     $selectedMods = __CP_SelectModules -Modules $mods -Include $IncludeModules -Exclude $ExcludeModules
-    if ($selectedMods.Count -eq 0) { Write-Warn "No modules selected. Exiting."; return }
+    if (@($selectedMods).Count -eq 0) { Write-Warn "No modules selected. Exiting."; return }
     __CP_ExecuteModules -Modules $selectedMods -Context $ctx -Mode $Mode
   }
 }
@@ -184,7 +184,7 @@ function __CP_ExecuteModules {
   )
   
   $names = ($Modules | ForEach-Object { $_.Name }) -join ', '
-  Write-Info ("Running {0} module(s): {1}" -f $Modules.Count, $names)
+  Write-Info ("Running {0} module(s): {1}" -f @($Modules).Count, $names)
 
   foreach ($m in $Modules) {
     try {
