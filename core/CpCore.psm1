@@ -120,41 +120,71 @@ function Invoke-CpAutoCore {
 
   Write-Info "Starting engine (Mode=$Mode, Profile=$Profile, Overlay=$Overlay)"
 
+  # Build context and get modules ONCE (outside of interactive loop)
   $ctx  = __CP_BuildContext -Root $Root
   $mods = __CP_GetModules  -Root $Root
-  $mods = @($mods)
   if ($mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
 
   if ($Interactive) {
-    Write-Host ""
-    Write-Host "Select modules to run (comma-separated indexes or names; 'all' for everything):" -ForegroundColor Cyan
-    $i = 1
-    foreach ($m in $mods) { Write-Host ("  {0,2}. {1}  [{2}]" -f $i,$m.Name,$m.Category) ; $i++ }
-    $choice = Read-Host "Your selection"
-    if ($choice -and $choice.ToLower() -ne 'all') {
-      $tokens = @($choice -split '[\s,]+' | Where-Object { $_ })
-      $include = @()
-      foreach ($t in $tokens) {
-        if ($t -match '^\d+$') {
-          $idx = [int]$t
-          if ($idx -ge 1 -and $idx -le $mods.Count) { $include += $mods[$idx-1].Name }
-        } else {
-          $include += $t
+    # Interactive loop - context and modules are already built
+    do {
+      Write-Host ""
+      Write-Host "Select modules to run (comma-separated indexes or names; 'all' for everything):" -ForegroundColor Cyan
+      $i = 1
+      foreach ($m in $mods) { Write-Host ("  {0,2}. {1}  [{2}]" -f $i,$m.Name,$m.Category) ; $i++ }
+      $choice = Read-Host "Your selection"
+      
+      $selectedMods = @($mods)
+      if ($choice -and $choice.ToLower() -ne 'all') {
+        $tokens = @($choice -split '[\s,]+' | Where-Object { $_ })
+        $include = @()
+        foreach ($t in $tokens) {
+          if ($t -match '^\d+$') {
+            $idx = [int]$t
+            if ($idx -ge 1 -and $idx -le $mods.Count) { $include += $mods[$idx-1].Name }
+          } else {
+            $include += $t
+          }
         }
+        $selectedMods = __CP_SelectModules -Modules $mods -Include $include
       }
-      $mods = __CP_SelectModules -Modules $mods -Include $include
-    }
+      
+      if ($selectedMods.Count -eq 0) { 
+        Write-Warn "No modules selected."
+        continue
+      }
+      
+      # Execute selected modules
+      __CP_ExecuteModules -Modules $selectedMods -Context $ctx -Mode $Mode
+      
+      # Ask if user wants to continue
+      Write-Host ""
+      $continue = Read-Host "Run another module? (y/n)"
+      $runAnother = ($continue -match '^y|yes$')
+      
+    } while ($runAnother)
+    
+    Write-Ok "Interactive session complete"
+    return
   } else {
-    $mods = __CP_SelectModules -Modules $mods -Include $IncludeModules -Exclude $ExcludeModules
+    # Non-interactive mode
+    $selectedMods = __CP_SelectModules -Modules $mods -Include $IncludeModules -Exclude $ExcludeModules
+    if ($selectedMods.Count -eq 0) { Write-Warn "No modules selected. Exiting."; return }
+    __CP_ExecuteModules -Modules $selectedMods -Context $ctx -Mode $Mode
   }
+}
 
-  $mods = @($mods)
-  if ($mods.Count -eq 0) { Write-Warn "No modules selected. Exiting."; return }
+function __CP_ExecuteModules {
+  param(
+    [Parameter(Mandatory)][array]$Modules,
+    [Parameter(Mandatory)][object]$Context,
+    [Parameter(Mandatory)][string]$Mode
+  )
+  
+  $names = ($Modules | ForEach-Object { $_.Name }) -join ', '
+  Write-Info ("Running {0} module(s): {1}" -f $Modules.Count, $names)
 
-  $names = ($mods | ForEach-Object { $_.Name }) -join ', '
-  Write-Info ("Running {0} module(s): {1}" -f $mods.Count, $names)
-
-  foreach ($m in $mods) {
+  foreach ($m in $Modules) {
     try {
       Import-Module -Force -DisableNameChecking -Name $m.Path
       $fnApply  = Get-Command -Name 'Invoke-Apply' -EA SilentlyContinue
@@ -163,7 +193,7 @@ function Invoke-CpAutoCore {
 
       if ($fnReady) {
         $ok = $true
-        try { $ok = Test-Ready -Context $ctx } catch {}
+        try { $ok = Test-Ready -Context $Context } catch {}
         if ($ok -is [bool] -and -not $ok) { Write-Warn "Skipping $($m.Name) (Test-Ready=false)"; continue }
       }
 
@@ -171,7 +201,7 @@ function Invoke-CpAutoCore {
       if (-not $fn) { Write-Warn "Module $($m.Name) loaded but no function for Mode=$Mode"; continue }
 
       Write-Info ("Running {0} (prio {1})" -f $m.Name,$m.Priority)
-      & $fn -Context $ctx | Out-Null
+      & $fn -Context $Context | Out-Null
       Write-Ok "$($m.Name) completed"
     } catch {
       Write-Err ("{0} failed: {1}" -f $m.Name, $_.Exception.Message)
