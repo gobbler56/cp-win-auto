@@ -122,8 +122,8 @@ function Invoke-CpAutoCore {
 
   # Build context and get modules ONCE (outside of interactive loop)
   $ctx  = __CP_BuildContext -Root $Root
-  $mods = __CP_GetModules  -Root $Root
-  if ($mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
+  $mods = @(__CP_GetModules -Root $Root)
+  if (-not $mods -or $mods.Count -eq 0) { throw "No modules discovered under $Root\modules" }
 
   if ($Interactive) {
     # Interactive loop - context and modules are already built
