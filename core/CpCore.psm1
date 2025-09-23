@@ -87,7 +87,9 @@ function __CP_GetModules {
 function __CP_SelectModules {
   param([object[]]$Modules, [string[]]$Include, [string[]]$Exclude)
   $Modules = @($Modules)
-  if ($Include -and $Include.Count -gt 0) {
+  if ($Include) { $Include = @($Include) } else { $Include = @() }
+  if ($Exclude) { $Exclude = @($Exclude) } else { $Exclude = @() }
+  if ($Include.Count -gt 0) {
     $wanted = @()
     foreach ($pat in $Include) {
       $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
@@ -95,7 +97,7 @@ function __CP_SelectModules {
     }
     $Modules = @($wanted | Select-Object -Unique)
   }
-  if ($Exclude -and $Exclude.Count -gt 0) {
+  if ($Exclude.Count -gt 0) {
     foreach ($pat in $Exclude) {
       $rx = [regex]::Escape($pat).Replace('\*','.*').Replace('\?','.')
       $Modules = @($Modules | Where-Object { $_.Name -notmatch $rx -and $_.Category -notmatch $rx })
