@@ -143,15 +143,15 @@ function Invoke-CpAutoCore {
         foreach ($t in $tokens) {
           if ($t -match '^\d+$') {
             $idx = [int]$t
-            if ($idx -ge 1 -and $idx -le $mods.Count) { $include += $mods[$idx-1].Name }
-          if ($idx -ge 1 -and $idx -le @($mods).Count) { $include += @($mods)[$idx-1].Name }
+            if ($idx -ge 1 -and $idx -le @($mods).Count) { $include += @($mods)[$idx-1].Name }
+          } else {
             $include += $t
           }
         }
         $selectedMods = __CP_SelectModules -Modules $mods -Include $include
       }
       
-      if ($selectedMods.Count -eq 0) { 
+      if (@($selectedMods).Count -eq 0) { 
         Write-Warn "No modules selected."
         continue
       }
@@ -166,7 +166,6 @@ function Invoke-CpAutoCore {
       
     } while ($runAnother)
     
-    if (@($selectedMods).Count -eq 0) { 
     return
   } else {
     # Non-interactive mode
