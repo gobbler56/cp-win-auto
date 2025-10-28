@@ -2,9 +2,8 @@
   "order": [
     "Dependencies",
     "UserAuditing",
-    "LocalPolicy",
+    "LocalAccountPolicy",
     "ApplicationSecurity",
-    "AccountPolicy",
     "Defensive",
     "ServiceAuditing",
     "OSUpdates",

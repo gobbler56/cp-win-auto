@@ -1,6 +1,6 @@
 {
-  "name": "LocalPolicy",
-  "category": "LocalPolicy",
+  "name": "LocalAccountPolicy",
+  "category": "Policy",
   "priority": 10,
   "appliesTo": {
     "os": [
