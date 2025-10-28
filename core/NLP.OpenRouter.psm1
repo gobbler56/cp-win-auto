@@ -31,10 +31,12 @@ When uncertain, leave arrays empty. Never output null/undefined and never add ex
 
 Extraction rules:
 - **Title**: Prefer page <title> or the first visible heading naming the image (strip suffix like "README").
-- **Users**: Combine all users mentioned anywhere (authorized lists, prose instructions like “create user ...”, screenshots text if present).
+- **Users**: Combine all accounts that should remain on the system (authorized lists, prose instructions like “create user ...”, screenshots text if present).
   * Name is the local account token: strip annotations like "(you)", emails/domains, punctuation around quotes.
   * `account_type`: "admin" if placed in Administrators or listed under "Authorized Administrators"; else "standard".
   * `groups`: include any named local groups each user should belong to (e.g., "hypersonic") as they appear in text.
+- **Recent hires**: If the README explicitly states that a user is newly hired or must be created, include them in `recent_hires` **and** in `all_users` with their expected account type and groups.
+- **Terminated users**: If the README says a user should be removed/terminated, list the account token inside `terminated_users` and do **not** include it anywhere else.
 - **Groups**: If the README says “create group ... and add ...”, you still encode this only via each user's `groups` array.
 - **Critical services**: List service/product names explicitly mentioned as important to keep/configure (e.g., "IIS", "RDP", "SMB", "DNS", "MySQL", "Apache", "PHP", "FileZilla"). Don’t infer.
 - Ignore passwords provided in the README.
@@ -48,7 +50,7 @@ Return ONLY JSON. No explanations.
   $schema = @{
     type = "object"
     additionalProperties = $false
-    required = @("title","all_users","critical_services")
+    required = @("title","all_users","recent_hires","terminated_users","critical_services")
     properties = @{
       title = @{ type = "string" }
       all_users = @{
@@ -66,6 +68,26 @@ Return ONLY JSON. No explanations.
             }
           }
         }
+      }
+      recent_hires = @{
+        type = "array"
+        items = @{
+          type = "object"
+          additionalProperties = $false
+          required = @("name","account_type","groups")
+          properties = @{
+            name = @{ type = "string" }
+            account_type = @{ type = "string"; enum = @("admin","standard") }
+            groups = @{
+              type = "array"
+              items = @{ type = "string" }
+            }
+          }
+        }
+      }
+      terminated_users = @{
+        type = "array"
+        items = @{ type = "string" }
       }
       critical_services = @{
         type = "array"

@@ -10,6 +10,43 @@ if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
 
 function Test-Ready { param($Context) return $true }
 
+function Align-PrivilegedGroupMembership {
+  param(
+    [string]$GroupName,
+    [System.Collections.Generic.HashSet[string]]$AuthorizedAdmins,
+    [string]$BuiltInAdmin,
+    [bool]$ForceRemovalWhenEmpty = $false
+  )
+
+  if (-not $GroupName) { return }
+  $group = Get-LocalGroup -Name $GroupName -ErrorAction SilentlyContinue
+  if (-not $group) { return }
+
+  $members = @()
+  try { $members = Get-LocalGroupMember -Group $GroupName -ErrorAction Stop } catch { return }
+
+  foreach ($member in $members) {
+    if ($member.ObjectClass -ne 'User') { continue }
+    $name = ($member.Name -split '\\')[-1]
+    if (-not $name) { continue }
+    if ($GroupName -eq 'Administrators' -and $name -eq $BuiltInAdmin) { continue }
+    $shouldRemove = $ForceRemovalWhenEmpty -or $AuthorizedAdmins.Count -gt 0
+    if ($shouldRemove -and -not $AuthorizedAdmins.Contains($name)) {
+      Remove-UserFromLocalGroupSafe -Group $GroupName -User $name
+      Write-Ok "Removed $name from $GroupName"
+    }
+  }
+
+  foreach ($admin in $AuthorizedAdmins) {
+    if (-not $admin) { continue }
+    Ensure-LocalUserExists -Name $admin -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
+    if (-not (Test-LocalGroupMember -Group $GroupName -User $admin)) {
+      Add-UserToLocalGroupSafe -Group $GroupName -User $admin
+      Write-Ok "Ensured $admin is in $GroupName"
+    }
+  }
+}
+
 function Invoke-Apply {
   param($Context)
 
@@ -21,6 +58,28 @@ function Invoke-Apply {
   $rx = $Context.Readme.Directives
   $authUsersFromReadme  = @($Context.Readme.AuthorizedUsers)
   $authAdminsFromReadme = @($Context.Readme.AuthorizedAdmins)
+  $recentHires = @()
+  $terminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  if ($rx -and $rx.PSObject.Properties.Name -contains 'UsersToCreate' -and $rx.UsersToCreate) {
+    foreach ($entry in @($rx.UsersToCreate)) {
+      if (-not $entry) { continue }
+      $name = $entry.Name
+      if (-not $name) { continue }
+      $recentHires += [pscustomobject]@{
+        Name        = $name
+        AccountType = $entry.AccountType
+        Groups      = @($entry.Groups)
+      }
+    }
+  }
+  $terminatedUsers = @()
+  if ($rx -and $rx.PSObject.Properties.Name -contains 'TerminatedUsers' -and $rx.TerminatedUsers) {
+    foreach ($term in @($rx.TerminatedUsers)) {
+      $name = ($term -as [string]).Trim()
+      if (-not $name) { continue }
+      if ($terminatedSet.Add($name)) { $terminatedUsers += $name }
+    }
+  }
 
   # -------- Phase 1: Allow-lists from README (authoritative) --------
   $authorizedUsers  = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
@@ -28,6 +87,17 @@ function Invoke-Apply {
 
   $authorizedAdmins = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
   foreach ($x in @($authAdminsFromReadme)) { if ($x) { [void]$authorizedAdmins.Add($x); [void]$authorizedUsers.Add($x) } }
+
+  foreach ($hire in $recentHires) {
+    if (-not $hire.Name) { continue }
+    [void]$authorizedUsers.Add($hire.Name)
+    if ($hire.AccountType -eq 'admin') { [void]$authorizedAdmins.Add($hire.Name) }
+  }
+
+  foreach ($term in $terminatedUsers) {
+    [void]$authorizedUsers.Remove($term)
+    [void]$authorizedAdmins.Remove($term)
+  }
 
   foreach ($u in $authorizedUsers) {
     Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
@@ -50,6 +120,19 @@ function Invoke-Apply {
   # re-enumerate
   $currentUsers = Get-LocalUserNames
 
+  # -------- Phase 3b: Explicit terminations --------
+  foreach ($term in $terminatedUsers) {
+    if ($defaults -contains $term) { continue }
+    $user = Get-LocalUser -Name $term -ErrorAction SilentlyContinue
+    if (-not $user) { continue }
+    try { Get-LocalGroup | ForEach-Object { Remove-UserFromLocalGroupSafe -Group $_.Name -User $term } } catch {}
+    Remove-LocalUserSafe -Name $term
+    Write-Ok "Removed terminated user $term"
+  }
+
+  # Refresh after deletions
+  $currentUsers = Get-LocalUserNames
+
   # -------- Phase 3: Groups from README model output --------
   foreach ($g in ($rx.GroupsToCreate | Select-Object -Unique)) {
     if (-not (Get-LocalGroup -Name $g -ErrorAction SilentlyContinue)) {
@@ -65,25 +148,22 @@ function Invoke-Apply {
     }
   }
 
-  # -------- Phase 4: Administrators membership alignment --------
-  try { $members = Get-LocalGroupMember -Group $adminGroup -ErrorAction SilentlyContinue } catch { $members = @() }
-  if ($members) {
-    foreach ($m in $members) {
-      if ($m.ObjectClass -ne 'User' -or $m.PrincipalSource -ne 'Local') { continue }
-      $name = ($m.Name -split '\\')[-1]
-      if (-not ($authorizedAdmins.Contains($name)) -and $name -ne $builtInAdmin) {
-        Remove-UserFromLocalGroupSafe -Group $adminGroup -User $name
-        Write-Ok "Removed $name from $adminGroup"
-      }
-    }
-  }
-  foreach ($a in $authorizedAdmins) {
-    if ($currentUsers -contains $a) { Add-UserToLocalGroupSafe -Group $adminGroup -User $a }
-    else {
-      Ensure-LocalUserExists -Name $a -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
-      Add-UserToLocalGroupSafe -Group $adminGroup -User $a
-    }
-    Write-Ok "Ensured $a is in $adminGroup"
+  # -------- Phase 4: Privileged group alignment --------
+  $privilegedGroups = @(
+    'Administrators',
+    'DnsAdmins',
+    'Enterprise Admins',
+    'Schema Admins',
+    'Account Operators',
+    'Server Operators',
+    'Backup Operators',
+    'Print Operators',
+    'Network Configuration Operators',
+    'Hyper-V Administrators'
+  )
+  foreach ($grpName in ($privilegedGroups | Select-Object -Unique)) {
+    $force = ($grpName -ieq $adminGroup)
+    Align-PrivilegedGroupMembership -GroupName $grpName -AuthorizedAdmins $authorizedAdmins -BuiltInAdmin $builtInAdmin -ForceRemovalWhenEmpty:$force
   }
 
   # -------- Phase 5: Global per-user hardening --------
