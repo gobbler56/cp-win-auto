@@ -8,6 +8,194 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
   function New-ModuleResult { param([string]$Name,[string]$Status,[string]$Message) [pscustomobject]@{Name=$Name;Status=$Status;Message=$Message} }
 }
 
+$script:ServicePlanModel        = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5' }
+$script:ServicePlanMaxServices  = 200
+$script:ServicePlanEndpoint     = 'https://openrouter.ai/api/v1/chat/completions'
+
+function ConvertTo-PlainText {
+  param([string]$Html)
+  if ([string]::IsNullOrWhiteSpace($Html)) { return '' }
+  $text = $Html -replace '(?is)<script.*?>.*?</script>', ''
+  $text = $text -replace '(?is)<style.*?>.*?</style>', ''
+  $text = $text -replace '(?is)<head.*?>.*?</head>', ''
+  $text = $text -replace '<.*?>', ' '
+  return (($text -replace '\s+', ' ').Trim())
+}
+
+function Get-ServiceInventory {
+  try {
+    $services = Get-CimInstance -ClassName Win32_Service -ErrorAction Stop
+  } catch {
+    try { $services = Get-WmiObject -Class Win32_Service -ErrorAction Stop } catch { $services = @() }
+  }
+  if (-not $services) { return @() }
+  return @($services | Select-Object Name, DisplayName, StartMode, State | Sort-Object Name)
+}
+
+function Build-ServiceAiRequest {
+  param(
+    [object[]]$Inventory,
+    [string]$ReadmeText
+  )
+
+  $systemPrompt = @"
+You are an assistant that configures Windows services for CyberPatriot scoring.
+Decide which services must be enabled or disabled to comply with the README instructions.
+Only reference service names that appear in the provided inventory (Name column).
+Return ONLY a JSON object with this schema:
+{ "enable": ["ServiceName"], "disable": ["ServiceName"] }
+Use `enable` for services that must be running/automatic, and `disable` for services that must be stopped/disabled.
+If the README does not mention a service, leave it out of both arrays.
+"@
+
+  $schema = @{
+    type = 'object'
+    additionalProperties = $false
+    required = @('enable','disable')
+    properties = @{
+      enable = @{ type = 'array'; items = @{ type = 'string' } }
+      disable = @{ type = 'array'; items = @{ type = 'string' } }
+    }
+  }
+
+  $lines = @()
+  $max = [math]::Min($Inventory.Count, $script:ServicePlanMaxServices)
+  for ($i = 0; $i -lt $max; $i++) {
+    $svc = $Inventory[$i]
+    $lines += "{0} | DisplayName={1} | StartMode={2} | State={3}" -f $svc.Name, $svc.DisplayName, $svc.StartMode, $svc.State
+  }
+  if ($Inventory.Count -gt $max) {
+    $lines += "... (truncated {0} of {1} services)" -f $max, $Inventory.Count
+  }
+  $inventoryBlock = ($lines -join [Environment]::NewLine)
+
+  $messages = @(
+    @{ role = 'system'; content = $systemPrompt },
+    @{ role = 'user'; content = @"
+README CONTENT:
+$ReadmeText
+
+SERVICE INVENTORY:
+$inventoryBlock
+
+Respond with JSON only.
+"@ }
+  )
+
+  $body = @{
+    model = $script:ServicePlanModel
+    temperature = 0
+    top_p = 1
+    messages = $messages
+    response_format = @{
+      type = 'json_schema'
+      json_schema = @{
+        name = 'service_plan'
+        schema = $schema
+      }
+    }
+  }
+
+  return ($body | ConvertTo-Json -Depth 10)
+}
+
+function Invoke-ServicePlan {
+  param(
+    [object[]]$Inventory,
+    [string]$ReadmeText
+  )
+
+  if (-not $Inventory -or $Inventory.Count -eq 0) { return $null }
+  if ([string]::IsNullOrWhiteSpace($ReadmeText)) { return $null }
+
+  $apiKey = $env:OPENROUTER_API_KEY
+  if (-not $apiKey) { throw 'OPENROUTER_API_KEY not set' }
+
+  $body = Build-ServiceAiRequest -Inventory $Inventory -ReadmeText $ReadmeText
+
+  $headers = @{
+    'Authorization' = "Bearer $apiKey"
+    'Content-Type'  = 'application/json'
+    'X-Title'       = 'CP-Service-Planning'
+  }
+
+  $response = Invoke-RestMethod -Method Post -Uri $script:ServicePlanEndpoint -Headers $headers -Body $body -ErrorAction Stop
+  $content = $response.choices[0].message.content
+  if (-not $content) { throw 'OpenRouter returned empty content' }
+  if ($content -match '^\s*```') { $content = ($content -replace '^\s*```(?:json)?','' -replace '```\s*$','').Trim() }
+
+  $parsed = $content | ConvertFrom-Json
+  if (-not $parsed) { return $null }
+
+  $enable = @()
+  if ($parsed.PSObject.Properties.Name -contains 'enable' -and $parsed.enable) {
+    foreach ($item in @($parsed.enable)) {
+      $name = ($item -as [string]).Trim()
+      if ($name) { $enable += $name }
+    }
+  }
+  $disable = @()
+  if ($parsed.PSObject.Properties.Name -contains 'disable' -and $parsed.disable) {
+    foreach ($item in @($parsed.disable)) {
+      $name = ($item -as [string]).Trim()
+      if ($name) { $disable += $name }
+    }
+  }
+
+  return [pscustomobject]@{
+    Enable  = @($enable | Select-Object -Unique)
+    Disable = @($disable | Select-Object -Unique)
+  }
+}
+
+function Apply-ServicePlan {
+  param(
+    [pscustomobject]$Plan,
+    [object[]]$Inventory
+  )
+
+  if (-not $Plan) { return 0 }
+
+  $nameMap = New-Object System.Collections.Generic.Dictionary[string,string] ([StringComparer]::OrdinalIgnoreCase)
+  $displayMap = New-Object System.Collections.Generic.Dictionary[string,string] ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($svc in $Inventory) {
+    if ($svc.Name -and -not $nameMap.ContainsKey($svc.Name)) { $nameMap[$svc.Name] = $svc.Name }
+    if ($svc.DisplayName -and -not $displayMap.ContainsKey($svc.DisplayName)) { $displayMap[$svc.DisplayName] = $svc.Name }
+  }
+
+  $changes = 0
+
+  foreach ($target in @($Plan.Enable)) {
+    if (-not $target) { continue }
+    $resolved = $null
+    if ($nameMap.ContainsKey($target)) { $resolved = $nameMap[$target] }
+    elseif ($displayMap.ContainsKey($target)) { $resolved = $displayMap[$target] }
+    if (-not $resolved) {
+      Write-Warn ("AI requested enabling unknown service '{0}'" -f $target)
+      continue
+    }
+    Apply-ServiceState -Name $resolved -Start 2
+    Write-Ok ("AI directive: enabled {0}" -f $resolved)
+    $changes++
+  }
+
+  foreach ($target in @($Plan.Disable)) {
+    if (-not $target) { continue }
+    $resolved = $null
+    if ($nameMap.ContainsKey($target)) { $resolved = $nameMap[$target] }
+    elseif ($displayMap.ContainsKey($target)) { $resolved = $displayMap[$target] }
+    if (-not $resolved) {
+      Write-Warn ("AI requested disabling unknown service '{0}'" -f $target)
+      continue
+    }
+    Apply-ServiceState -Name $resolved -Start 4
+    Write-Ok ("AI directive: disabled {0}" -f $resolved)
+    $changes++
+  }
+
+  return $changes
+}
+
 # --- YOUR embedded baseline export ---
 $EmbeddedRegBlob = @'
 Windows Registry Editor Version 5.00
@@ -421,7 +609,39 @@ function Invoke-Apply { param($Context)
     Write-Ok ("{0} => Start={1}" -f $name, [int]$map[$name])
   }
 
-  New-ModuleResult -Name 'ServiceHardening' -Status 'Succeeded' -Message ("Applied baseline to {0} services" -f $touched)
+  $inventory = @()
+  try { $inventory = Get-ServiceInventory } catch { Write-Warn ("Failed to enumerate services: {0}" -f $_.Exception.Message) }
+
+  $readmeText = ''
+  if ($Context -and $Context.Readme) {
+    if ($Context.Readme.PSObject.Properties.Name -contains 'PlainText' -and $Context.Readme.PlainText) {
+      $readmeText = [string]$Context.Readme.PlainText
+    } elseif ($Context.Readme.PSObject.Properties.Name -contains 'RawHtml' -and $Context.Readme.RawHtml) {
+      $readmeText = ConvertTo-PlainText -Html $Context.Readme.RawHtml
+    }
+  }
+  if ($readmeText.Length -gt 6000) { $readmeText = $readmeText.Substring(0,6000) }
+
+  $dynamicChanges = 0
+  if ($inventory -and $inventory.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($readmeText)) {
+    try {
+      $plan = Invoke-ServicePlan -Inventory $inventory -ReadmeText $readmeText
+      if ($plan -and (($plan.Enable -and $plan.Enable.Count -gt 0) -or ($plan.Disable -and $plan.Disable.Count -gt 0))) {
+        $dynamicChanges = Apply-ServicePlan -Plan $plan -Inventory $inventory
+      } else {
+        Write-Info 'AI directives produced no additional service changes.'
+      }
+    } catch {
+      Write-Warn ("AI-driven service planning failed: {0}" -f $_.Exception.Message)
+    }
+  } else {
+    Write-Info 'Skipping AI service directives (missing README text or inventory).'
+  }
+
+  $message = "Applied baseline to {0} services" -f $touched
+  if ($dynamicChanges -gt 0) { $message += (", AI adjustments: {0}" -f $dynamicChanges) }
+
+  New-ModuleResult -Name 'ServiceHardening' -Status 'Succeeded' -Message $message
 }
 
 function Invoke-Verify { param($Context)

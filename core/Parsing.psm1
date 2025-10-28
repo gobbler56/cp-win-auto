@@ -55,8 +55,19 @@ function Get-ReadmeInfo {
       AuthorizedUsers  = @()
       AuthorizedAdmins = @()
       Notes            = @()
-      Directives       = [pscustomobject]@{ GroupsToCreate=@(); GroupMembersToAdd=@{}; UsersToCreate=@(); CriticalServices=@() }
+      Directives       = [pscustomobject]@{
+        GroupsToCreate            = @()
+        GroupMembersToAdd         = @{}
+        UsersToCreate             = @()
+        TerminatedUsers           = @()
+        CriticalServices          = @()
+        UnauthorizedUsersExplicit = @()
+        EnsureGuestDisabled       = $true
+        EnsureAdministratorDisabled = $true
+      }
       SourcePath       = $null
+      RawHtml          = ""
+      PlainText        = ""
     }
   }
 
@@ -71,7 +82,18 @@ function Get-ReadmeInfo {
         $admins = @()
         $users  = @()
         $groups = @{}
+        $terminatedRaw = @($doc.terminated_users) | Where-Object { $_ }
+        $terminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        $terminated = @()
+        foreach ($t in $terminatedRaw) {
+          $name = ($t -as [string]).Trim()
+          if ($name) {
+            if ($terminatedSet.Add($name)) { $terminated += $name }
+          }
+        }
         foreach ($u in $doc.all_users) {
+          if (-not $u.name) { continue }
+          if ($terminatedSet.Contains($u.name)) { continue }
           $users += $u.name
           if ($u.account_type -eq 'admin') { $admins += $u.name }
           if ($u.groups) {
@@ -81,11 +103,31 @@ function Get-ReadmeInfo {
             }
           }
         }
+
+        $recent = @()
+        foreach ($entry in @($doc.recent_hires)) {
+          if (-not $entry.name) { continue }
+          if ($terminatedSet.Contains($entry.name)) { continue }
+          $recent += [pscustomobject]@{
+            Name        = $entry.name
+            AccountType = $entry.account_type
+            Groups      = @($entry.groups)
+          }
+          $users += $entry.name
+          if ($entry.account_type -eq 'admin') { $admins += $entry.name }
+          if ($entry.groups) {
+            foreach ($g in $entry.groups) {
+              if (-not $groups.ContainsKey($g)) { $groups[$g] = @() }
+              $groups[$g] += $entry.name
+            }
+          }
+        }
+
         $directives = [ordered]@{
           GroupsToCreate            = @($groups.Keys | Select-Object -Unique)
-          GroupMembersToAdd         = @{} 
-          UsersToCreate             = @()
-          TerminatedUsers           = @()
+          GroupMembersToAdd         = @{}
+          UsersToCreate             = @($recent)
+          TerminatedUsers           = @($terminated)
           UnauthorizedUsersExplicit = @()
           EnsureGuestDisabled       = $true
           EnsureAdministratorDisabled = $true
@@ -98,6 +140,8 @@ function Get-ReadmeInfo {
           Notes            = @()
           Directives       = [pscustomobject]$directives
           SourcePath       = $fetch.Url
+          RawHtml          = $rawHtml
+          PlainText        = $plainText
         }
       }
     } catch {
@@ -110,8 +154,19 @@ function Get-ReadmeInfo {
     AuthorizedUsers  = @()
     AuthorizedAdmins = @()
     Notes            = @()
-    Directives       = [pscustomobject]@{ GroupsToCreate=@(); GroupMembersToAdd=@{}; UsersToCreate=@(); CriticalServices=@() }
+    Directives       = [pscustomobject]@{
+      GroupsToCreate            = @()
+      GroupMembersToAdd         = @{}
+      UsersToCreate             = @()
+      TerminatedUsers           = @()
+      CriticalServices          = @()
+      UnauthorizedUsersExplicit = @()
+      EnsureGuestDisabled       = $true
+      EnsureAdministratorDisabled = $true
+    }
     SourcePath       = $fetch.Url
+    RawHtml          = $rawHtml
+    PlainText        = $plainText
   }
 }
 
