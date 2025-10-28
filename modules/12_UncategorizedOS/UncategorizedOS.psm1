@@ -14,6 +14,7 @@ $script:OpenRouterModel         = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_M
 $script:MaxReadmeCharacters     = 6000
 $script:MaxShareEntries         = 50
 $script:DefaultShareNames       = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:LastRemovedShares       = @()
 $script:WriteRightsMask         = [System.Security.AccessControl.FileSystemRights]::FullControl -bor \
   [System.Security.AccessControl.FileSystemRights]::Modify -bor \
   [System.Security.AccessControl.FileSystemRights]::Write -bor \
@@ -349,9 +350,18 @@ function Ensure-DirectoryRestrictions {
 
 function Ensure-ShareRestrictions {
   $changed = $false
-  foreach ($shareName in @('C','exsharename')) {
-    if (Remove-SpecificShare -Name $shareName) { $changed = $true }
+  $script:LastRemovedShares = @()
+
+  try {
+    $removedShares = Remove-NonDefaultSharesWithAi
+    if ($removedShares.Count -gt 0) {
+      $script:LastRemovedShares = $removedShares
+      $changed = $true
+    }
+  } catch {
+    Write-Warn ("Failed to audit SMB shares with AI: {0}" -f $_.Exception.Message)
   }
+
   if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
     try {
       $access = Get-SmbShareAccess -Name 'SYSVOL' -ErrorAction Stop | Where-Object { $_.AccountName -eq 'Everyone' }
@@ -361,6 +371,7 @@ function Ensure-ShareRestrictions {
       }
     } catch {}
   }
+
   return $changed
 }
 
@@ -603,16 +614,10 @@ function Apply-AllSettings {
   if (Ensure-HeapMitigationOptions) { $changes += 'Updated mitigation options' }
   if (Ensure-IpSourceRoutingDisabled) { $changes += 'Disabled IP source routing' }
   if (Ensure-DirectoryRestrictions) { $changes += 'Hardened directory ACLs' }
-  if (Ensure-ShareRestrictions) { $changes += 'Removed known unsafe shares' }
+  if (Ensure-ShareRestrictions) { $changes += 'Updated share restrictions' }
 
-  $removedShares = @()
-  try {
-    $removedShares = Remove-NonDefaultSharesWithAi
-    if ($removedShares.Count -gt 0) {
-      $changes += ("Removed non-default shares: {0}" -f ($removedShares -join ', '))
-    }
-  } catch {
-    Write-Warn ("Failed to audit SMB shares with AI: {0}" -f $_.Exception.Message)
+  if ($script:LastRemovedShares.Count -gt 0) {
+    $changes += ("Removed non-default shares: {0}" -f ($script:LastRemovedShares -join ', '))
   }
 
   return $changes
