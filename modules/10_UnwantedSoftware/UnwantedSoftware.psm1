@@ -9,7 +9,7 @@ if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
 
 $script:ModuleName          = 'UnwantedSoftware'
 $script:ApiUrl              = 'https://openrouter.ai/api/v1/chat/completions'
-$script:ApiKey              = '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'
+$script:ApiKeyEnvVar        = 'OPENROUTER_API_KEY'
 $script:ScanDirectories     = @('C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData', 'C:\\Users')
 $script:FileExtensions      = @('*.exe','*.msi','*.zip','*.bat','*.cmd','*.ps1','*.sh','*.vbs','*.py')
 $script:StaticBaseline      = @()
@@ -72,11 +72,17 @@ function Get-CondensedPaths {
   return @($condensed)
 }
 
+function Get-OpenRouterApiKey {
+  $key = [System.Environment]::GetEnvironmentVariable($script:ApiKeyEnvVar)
+  if (-not $key) { return '' }
+  return $key
+}
+
 function Test-Ready {
   param($Context)
 
-  if (-not $script:ApiKey) {
-    Write-Warn 'OpenRouter API key is missing; cannot classify software inventory.'
+  if (-not (Get-OpenRouterApiKey)) {
+    Write-Warn "OpenRouter API key is missing (set `$env:$($script:ApiKeyEnvVar)); cannot classify software inventory."
     return $false
   }
 
@@ -287,8 +293,13 @@ function Invoke-Classification {
 
   $bodyJson = Build-AiRequest -Inventory $Inventory -ReadmeText $ReadmeText
 
+  $apiKey = Get-OpenRouterApiKey
+  if (-not $apiKey) {
+    throw 'OpenRouter API key was not available when classification was attempted.'
+  }
+
   $headers = @{
-    'Authorization' = "Bearer $($script:ApiKey)"
+    'Authorization' = "Bearer $apiKey"
     'Content-Type'  = 'application/json'
   }
 
