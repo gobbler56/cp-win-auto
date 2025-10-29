@@ -92,7 +92,6 @@ function Disable-RemoteDesktopFeatures {
   $changed = (Ensure-RegistryValue -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Type 'DWord' -Value 1) -or $changed
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Name 'fAllowToGetHelp' -Type 'DWord' -Value 0) -or $changed
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Name 'fAllowFullControl' -Type 'DWord' -Value 0) -or $changed
-  $changed = (Ensure-RegistryValue -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'AllowTSConnections' -Type 'DWord' -Value 0) -or $changed
   return $changed
 }
 
