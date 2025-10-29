@@ -80,7 +80,12 @@ Only output valid JSON for the directive object.
     )
   }
 
-  return ($body | ConvertTo-Json -Depth 6)
+  $json = $body | ConvertTo-Json -Depth 6
+  if ($json -is [System.Array]) {
+    $json = $json -join [Environment]::NewLine
+  }
+
+  return [string]$json
 }
 
 function Get-ServicePlanContentText {
