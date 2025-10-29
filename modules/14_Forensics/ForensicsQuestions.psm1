@@ -526,11 +526,11 @@ function Execute-RequestedCommands {
   $count = 0
   foreach ($req in $Requests) {
     if ($count -ge $script:MaxCommandRequests) {
-      $results.Add([pscustomobject]@{ Command=$req; Allowed=$false; Success=$false; Output=''; Error='Request limit exceeded.' }) | Out-Null
+      [void]$results.Add([pscustomobject]@{ Command=$req; Allowed=$false; Success=$false; Output=''; Error='Request limit exceeded.' })
       continue
     }
     $count++
-    $results.Add(Invoke-AllowedCommand -Command $req) | Out-Null
+    [void]$results.Add(Invoke-AllowedCommand -Command $req)
   }
 
   return @($results)

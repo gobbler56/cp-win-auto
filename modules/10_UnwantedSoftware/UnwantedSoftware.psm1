@@ -14,7 +14,6 @@ $script:ScanDirectories     = @('C:\\Program Files', 'C:\\Program Files (x86)', 
 $script:FileExtensions      = @('*.exe','*.msi','*.zip','*.bat','*.cmd','*.ps1','*.sh','*.vbs','*.py')
 $script:StaticBaseline      = @()
 $script:MaxReadmeCharacters = 5000
-$script:MaxScanEntries      = 100
 
 function Normalize-InventoryPath {
   param([string]$Path)
@@ -233,9 +232,6 @@ function Get-Inventory {
 
   $unique = $results | Sort-Object -Unique
   $originalCount = $unique.Count
-  if ($originalCount -gt $script:MaxScanEntries) {
-    $unique = $unique | Select-Object -First $script:MaxScanEntries
-  }
 
   return [pscustomobject]@{ Items = @($unique); OriginalCount = $originalCount }
 }
@@ -262,7 +258,7 @@ You are analyzing installed software on a Windows system.
 README CONTENT:
 $ReadmeText
 
-SOFTWARE INVENTORY (first $($Inventory.Count) entries):
+SOFTWARE INVENTORY ($($Inventory.Count) entries):
 $inventoryBlock
 
 List any paths that should be deleted to comply with the README. Output ONLY a JSON array.
@@ -271,7 +267,7 @@ List any paths that should be deleted to comply with the README. Output ONLY a J
   $body = @{
     model       = 'openai/gpt-5'
     temperature = 0
-    max_tokens  = 2000
+    max_tokens  = 8000
     messages    = @(
       @{ role = 'system'; content = $systemPrompt },
       @{ role = 'user'; content = $userPrompt }
@@ -348,12 +344,7 @@ function Invoke-UnwantedSoftwareAssessment {
     return [pscustomobject]@{ Flagged=@(); Condensed=@(); Removed=@(); OriginalCount=0; UserDeclined=$false }
   }
 
-  $truncNote = if ($inventoryInfo.OriginalCount -gt $inventory.Count) {
-    " (truncated from {0})" -f $inventoryInfo.OriginalCount
-  } else {
-    ''
-  }
-  Write-Info ("Inventory collected ({0} entries{1})" -f $inventory.Count, $truncNote)
+  Write-Info ("Inventory collected ({0} entries)" -f $inventory.Count)
 
   $readmeText = ''
   try {
