@@ -530,7 +530,7 @@ function Execute-RequestedCommands {
       continue
     }
     $count++
-    [void]$results.Add(Invoke-AllowedCommand -Command $req)
+    [void]$results.Add((Invoke-AllowedCommand -Command $req))
   }
 
   return @($results)
