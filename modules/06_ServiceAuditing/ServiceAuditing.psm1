@@ -83,6 +83,39 @@ Only output valid JSON for the directive object.
   return ($body | ConvertTo-Json -Depth 6)
 }
 
+function Get-ServicePlanContentText {
+  param(
+    $Content
+  )
+
+  if ($null -eq $Content) { return '' }
+  if ($Content -is [string]) { return [string]$Content }
+
+  if ($Content.PSObject) {
+    if ($Content.PSObject.Properties.Name -contains 'value') {
+      return Get-ServicePlanContentText -Content $Content.value
+    }
+    if ($Content.PSObject.Properties.Name -contains 'text') {
+      return Get-ServicePlanContentText -Content $Content.text
+    }
+    if ($Content.PSObject.Properties.Name -contains 'content') {
+      return Get-ServicePlanContentText -Content $Content.content
+    }
+  }
+
+  if ($Content -is [System.Collections.IEnumerable]) {
+    $fragments = foreach ($item in $Content) {
+      $fragment = Get-ServicePlanContentText -Content $item
+      $fragmentString = [string]$fragment
+      if (-not [string]::IsNullOrWhiteSpace($fragmentString)) { $fragmentString }
+    }
+    if (-not $fragments) { return '' }
+    return (($fragments -join [Environment]::NewLine).Trim())
+  }
+
+  return [string]$Content
+}
+
 function Invoke-ServicePlan {
   param(
     [object[]]$Inventory,
@@ -107,8 +140,22 @@ function Invoke-ServicePlan {
   } catch {
     throw ("OpenRouter request failed: {0}" -f $_.Exception.Message)
   }
-  $content = $response.choices[0].message.content
-  if (-not $content) { throw 'OpenRouter returned empty content' }
+  $rawMessage = $null
+  if ($response.PSObject.Properties.Name -contains 'choices' -and $response.choices) {
+    $firstChoice = $response.choices | Select-Object -First 1
+    if ($firstChoice -and $firstChoice.PSObject.Properties.Name -contains 'message') {
+      $rawMessage = $firstChoice.message
+    }
+  }
+
+  $rawContent = $null
+  if ($rawMessage -and $rawMessage.PSObject.Properties.Name -contains 'content') {
+    $rawContent = $rawMessage.content
+  }
+
+  $content = Get-ServicePlanContentText -Content $rawContent
+  if ([string]::IsNullOrWhiteSpace($content)) { throw 'OpenRouter returned empty content' }
+  $content = $content.Trim()
   if ($content -match '^\s*```') { $content = ($content -replace '^\s*```(?:json)?','' -replace '```\s*$','').Trim() }
 
   try {
