@@ -44,7 +44,7 @@ function Invoke-ImportFirewallProfile {
   }
 
   Write-Info 'Importing firewall profile using netsh'
-  $args = @('advfirewall', 'import', "\"$($script:FirewallFile)\"")
+  $args = @('advfirewall', 'import', $script:FirewallFile)
   $proc = Start-Process -FilePath 'netsh.exe' -ArgumentList $args -Wait -PassThru -NoNewWindow
   if ($proc.ExitCode -ne 0) {
     throw ("netsh advfirewall import failed with exit code {0}" -f $proc.ExitCode)
