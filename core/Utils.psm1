@@ -45,6 +45,17 @@ function Get-LocalUserNames {
   $names
 }
 function To-SecureString { param([string]$s) ConvertTo-SecureString $s -AsPlainText -Force }
+function ConvertFrom-SecureStringToPlainText {
+  param([Parameter(Mandatory)][SecureString]$SecureString)
+  if (-not $SecureString) { return $null }
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+  try {
+    return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+  }
+  finally {
+    if ($bstr -and $bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  }
+}
 function New-RandomPassword {
   param([int]$Length = 20)
   $lc='abcdefghijkmnopqrstuvwxyz';$uc='ABCDEFGHJKLMNPQRSTUVWXYZ';$dg='23456789';$sc='!@#$%^&*()-_=+[]{}:,.?'
@@ -52,13 +63,31 @@ function New-RandomPassword {
   $base = @($pick.Invoke($lc,1),$pick.Invoke($uc,1),$pick.Invoke($dg,1),$pick.Invoke($sc,1),$pick.Invoke($lc+$uc+$dg+$sc,$Length-4)) -join ''
   -join ($base.ToCharArray() | Sort-Object {Get-Random})
 }
+function Invoke-NetUserCommand {
+  param([Parameter(Mandatory)][string[]]$Arguments)
+  $exe = Join-Path $env:SystemRoot 'System32/net.exe'
+  if (-not (Test-Path $exe)) { $exe = 'net.exe' }
+  $allArgs = @('user') + @($Arguments)
+  try {
+    & $exe @allArgs 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+  }
+  catch {
+    return $false
+  }
+}
 function Ensure-LocalUserExists {
   param([Parameter(Mandatory)][string]$Name,[SecureString]$Password,[switch]$CreateIfMissing)
   $u = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue
   if (-not $u -and $CreateIfMissing) {
     if (-not $Password) { $Password = To-SecureString (New-RandomPassword) }
-    try { New-LocalUser -Name $Name -Password $Password -FullName $Name -PasswordNeverExpires:$false -UserMayNotChangePassword:$false -AccountNeverExpires:$false -ErrorAction Stop | Out-Null }
-    catch { & net user $Name ([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password))) /add /y | Out-Null }
+    try {
+      New-LocalUser -Name $Name -Password $Password -FullName $Name -PasswordNeverExpires:$false -UserMayNotChangePassword:$false -AccountNeverExpires:$false -ErrorAction Stop | Out-Null
+    }
+    catch {
+      $plain = ConvertFrom-SecureStringToPlainText -SecureString $Password
+      if ($plain) { [void](Invoke-NetUserCommand -Arguments @($Name, $plain, '/add')) }
+    }
     $u = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue
   }
   return $u
@@ -66,12 +95,29 @@ function Ensure-LocalUserExists {
 function Set-LocalUserPassword {
   param([Parameter(Mandatory)][string]$Name,[SecureString]$Password)
   if (-not $Password) { $Password = To-SecureString (New-RandomPassword) }
-  try { Set-LocalUser -Name $Name -Password $Password -ErrorAction Stop }
-  catch { & net user $Name ([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password))) | Out-Null }
+  try {
+    Set-LocalUser -Name $Name -Password $Password -ErrorAction Stop
+  }
+  catch {
+    $plain = ConvertFrom-SecureStringToPlainText -SecureString $Password
+    if ($plain) { [void](Invoke-NetUserCommand -Arguments @($Name, $plain)) }
+  }
 }
-function Enable-LocalUserSafe { param([string]$Name) try { Enable-LocalUser -Name $Name -ErrorAction Stop } catch { & net user $Name /active:yes | Out-Null } }
-function Disable-LocalUserSafe { param([string]$Name) try { Disable-LocalUser -Name $Name -ErrorAction Stop } catch { & net user $Name /active:no  | Out-Null } }
-function Remove-LocalUserSafe { param([string]$Name) try { Remove-LocalUser -Name $Name -ErrorAction Stop } catch { & net user $Name /delete | Out-Null } }
+function Enable-LocalUserSafe {
+  param([string]$Name)
+  try { Enable-LocalUser -Name $Name -ErrorAction Stop }
+  catch { [void](Invoke-NetUserCommand -Arguments @($Name, '/active:yes')) }
+}
+function Disable-LocalUserSafe {
+  param([string]$Name)
+  try { Disable-LocalUser -Name $Name -ErrorAction Stop }
+  catch { [void](Invoke-NetUserCommand -Arguments @($Name, '/active:no')) }
+}
+function Remove-LocalUserSafe {
+  param([string]$Name)
+  try { Remove-LocalUser -Name $Name -ErrorAction Stop }
+  catch { [void](Invoke-NetUserCommand -Arguments @($Name, '/delete')) }
+}
 function Set-LocalPasswordExpires {
   param([Parameter(Mandatory)][string]$Name,[bool]$Expires)
   $ok=$false;$dom=$env:COMPUTERNAME;$flag=if($Expires){"TRUE"}else{"FALSE"}
@@ -83,8 +129,12 @@ function Set-LocalPasswordExpires {
   }
   return $ok
 }
-function Set-LocalUserCanChangePassword { param([Parameter(Mandatory)][string]$Name,[bool]$CanChange)
-  try { & net user $Name /passwordchg:$(if($CanChange){'yes'}else{'no'}) | Out-Null; return $true } catch { return $false }
+function Set-LocalUserCanChangePassword {
+  param([Parameter(Mandatory)][string]$Name,[bool]$CanChange)
+  try {
+    return (Invoke-NetUserCommand -Arguments @($Name, "/passwordchg:$(if($CanChange){'yes'}else{'no'})"))
+  }
+  catch { return $false }
 }
 function Test-LocalGroupMember {
   param([Parameter(Mandatory)][string]$Group,[Parameter(Mandatory)][string]$User)
