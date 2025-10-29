@@ -201,24 +201,22 @@ function Invoke-FakeUpdateOnFiles {
       param($filePath,$paramName,$displayVersion,$exePath,$helperPath)
       $LASTEXITCODE = 0
       $errMessage = $null
-      $capturedOutput = $null
+      $capturedOutput = ''
       $paramSwitch = "-$paramName"
       $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$helperPath,$paramSwitch,$filePath,'-DisplayVersion',$displayVersion)
-      
-      # Log the command being executed
-      Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
-      
+
       try {
-        $capturedOutput = & $exePath @args 2>&1 | Out-String
+        $rawOutput = & $exePath @args 2>&1
+        if ($rawOutput -is [string]) {
+          $capturedOutput = $rawOutput
+        } elseif ($null -ne $rawOutput) {
+          $capturedOutput = [string]::Join([Environment]::NewLine, $rawOutput)
+        }
       } catch {
         $errMessage = $_.Exception.Message
       }
       $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
-      
-      # Log the results
-      Write-Host "[DEBUG] File: $filePath, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow
-      Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
-      
+
       & $using:buildResult $filePath $exitCode $errMessage $capturedOutput
     } -ArgumentList $paramName,$displayVersion,$exePath,$HelperSingle -ThrottleLimit ([Math]::Max(1,$MaxParallel)) -AsJob
     if ($job) {
@@ -233,24 +231,22 @@ function Invoke-FakeUpdateOnFiles {
           param($f,$HelperSingle,$paramName,$exePath,$displayVersion)
           $LASTEXITCODE = 0
           $errMessage = $null
-          $capturedOutput = $null
+          $capturedOutput = ''
           $paramSwitch = "-$paramName"
           $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
-          
-          # Log the command being executed  
-          Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
-          
+
           try {
-            $capturedOutput = & $exePath @args 2>&1 | Out-String
+            $rawOutput = & $exePath @args 2>&1
+            if ($rawOutput -is [string]) {
+              $capturedOutput = $rawOutput
+            } elseif ($null -ne $rawOutput) {
+              $capturedOutput = [string]::Join([Environment]::NewLine, $rawOutput)
+            }
           } catch {
             $errMessage = $_.Exception.Message
           }
           $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
-          
-          # Log the results
-          Write-Host "[DEBUG] File: $f, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow  
-          Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
-          
+
           [pscustomobject]@{
             Path    = $f
             Success = ($exitCode -eq 0 -and -not $errMessage -and $capturedOutput -notmatch 'Write-Error|Exception|Error:|Failed|Cannot')
@@ -267,24 +263,22 @@ function Invoke-FakeUpdateOnFiles {
       $results = foreach ($f in $Files) {
         $LASTEXITCODE = 0
         $errMessage = $null
-        $capturedOutput = $null
+        $capturedOutput = ''
         $paramSwitch = "-$paramName"
         $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$HelperSingle,$paramSwitch,$f,'-DisplayVersion',$displayVersion)
-        
-        # Log the command being executed
-        Write-Host "[DEBUG] Executing: $exePath $($args -join ' ')" -ForegroundColor Yellow
-        
+
         try {
-          $capturedOutput = & $exePath @args 2>&1 | Out-String
+          $rawOutput = & $exePath @args 2>&1
+          if ($rawOutput -is [string]) {
+            $capturedOutput = $rawOutput
+          } elseif ($null -ne $rawOutput) {
+            $capturedOutput = [string]::Join([Environment]::NewLine, $rawOutput)
+          }
         } catch {
           $errMessage = $_.Exception.Message
         }
         $exitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
-        
-        # Log the results
-        Write-Host "[DEBUG] File: $f, ExitCode: $exitCode, Error: $errMessage" -ForegroundColor Yellow
-        Write-Host "[DEBUG] Output: $capturedOutput" -ForegroundColor Yellow
-        
+
         [pscustomobject]@{
           Path    = $f
           Success = ($exitCode -eq 0 -and -not $errMessage -and $capturedOutput -notmatch 'Write-Error|Exception|Error:|Failed|Cannot')
