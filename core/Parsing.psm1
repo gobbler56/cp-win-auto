@@ -91,8 +91,16 @@ function Find-RecentHireMentions {
 
         if (-not $name) { continue }
 
-        # Correctly trim quotes (avoid trimming backslashes!)
-        $name = $name.Trim('"', '''', '“', '”')
+        # Correctly trim quotes (avoid trimming backslashes!).
+        # Use explicit char codes so encoding quirks (e.g. UTF-8 smart quotes
+        # being read as multi-byte sequences like "â€œ") do not break Trim().
+        $trimChars = [char[]]@(
+            [char]0x0022,  # "
+            [char]0x0027,  # '
+            [char]0x201C,  # left smart quote
+            [char]0x201D   # right smart quote
+        )
+        $name = $name.Trim($trimChars)
         if (-not $name) { continue }
 
         # Filter generic tokens
@@ -340,7 +348,12 @@ $publicFunctions = @(
     'Get-ReadmeHtmlFromUrlFile'
 )
 
-if ($PSModuleName) {
+$moduleName = $null
+if (Test-Path -LiteralPath 'variable:PSModuleName') {
+    $moduleName = Get-Variable -Name PSModuleName -ValueOnly -ErrorAction SilentlyContinue
+}
+
+if ($moduleName) {
     Export-ModuleMember -Function $publicFunctions -Alias Get-Readme
 }
 else {
