@@ -13,8 +13,11 @@ $script:ApiKeyEnvVar          = 'OPENROUTER_API_KEY'
 $script:OpenRouterModel       = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5' }
 $script:OpenRouterMaxTokens   = 6000
 $script:QuestionPattern       = 'Forensics Question *.txt'
-$script:PlaceholderPattern    = '^(ANSWER:\s*)(<Type Answer Here>)(\s*)$'
-$script:PlaceholderRegex      = New-Object System.Text.RegularExpressions.Regex($script:PlaceholderPattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
+$script:PlaceholderPattern    = '^(?<indent>\s*)(?<prefix>ANSWER:\s*)(?<placeholder><Type Answer Here>)(?<suffix>\s*)$'
+$script:PlaceholderRegex      = New-Object System.Text.RegularExpressions.Regex(
+  $script:PlaceholderPattern,
+  [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+)
 $script:MaxCommandOutputBytes = 200 * 1024
 $script:MaxCommandRequests    = 6
 $script:SystemPrompt          = @"
@@ -561,6 +564,52 @@ function Build-CommandResultsPrompt {
   return $sb.ToString().TrimEnd()
 }
 
+function Get-FileEncoding {
+  param([string]$Path)
+
+  $default = [System.Text.Encoding]::UTF8
+
+  try {
+    $buffer = New-Object byte[] 4
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+      $read = $fs.Read($buffer, 0, $buffer.Length)
+    } finally {
+      $fs.Dispose()
+    }
+  } catch {
+    return $default
+  }
+
+  if ($read -ge 3 -and $buffer[0] -eq 0xEF -and $buffer[1] -eq 0xBB -and $buffer[2] -eq 0xBF) {
+    return [System.Text.Encoding]::UTF8
+  }
+
+  if ($read -ge 2) {
+    if ($buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE) {
+      return [System.Text.Encoding]::Unicode
+    }
+    if ($buffer[0] -eq 0xFE -and $buffer[1] -eq 0xFF) {
+      return [System.Text.Encoding]::BigEndianUnicode
+    }
+  }
+
+  if ($read -ge 4) {
+    if ($buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE -and $buffer[2] -eq 0x00 -and $buffer[3] -eq 0x00) {
+      return [System.Text.Encoding]::UTF32
+    }
+    if ($buffer[0] -eq 0x00 -and $buffer[1] -eq 0x00 -and $buffer[2] -eq 0xFE -and $buffer[3] -eq 0xFF) {
+      try {
+        return [System.Text.Encoding]::GetEncoding('utf-32BE')
+      } catch {
+        return $default
+      }
+    }
+  }
+
+  return $default
+}
+
 function Invoke-ForensicsQuestion {
   param([string]$Path,[string]$Content)
 
@@ -607,8 +656,27 @@ function Write-AnswersToFile {
 
   if (-not $Answers -or $Answers.Count -eq 0) { return $false }
 
-  $replacement = ($Answers | ForEach-Object { "ANSWER: $_" }) -join "`r`n"
-  $newContent = $script:PlaceholderRegex.Replace($Original, $replacement, 1)
+  $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+    param([System.Text.RegularExpressions.Match]$match)
+
+    $indent = $match.Groups['indent'].Value
+    $prefix = $match.Groups['prefix'].Value
+    $normalizedPrefix = if ($prefix) { $prefix } else { 'ANSWER: ' }
+    $suffix = $match.Groups['suffix'].Value
+
+    $lines = @()
+    foreach ($answer in $Answers) {
+      $lines += "$indent$normalizedPrefix$answer"
+    }
+
+    if ($lines.Count -gt 0 -and $suffix) {
+      $lines[$lines.Count - 1] = "$($lines[$lines.Count - 1])$suffix"
+    }
+
+    return ($lines -join "`r`n")
+  }
+
+  $newContent = $script:PlaceholderRegex.Replace($Original, $evaluator, 1)
   if ($newContent -eq $Original) { return $false }
 
   $backup = "$Path.bak"
@@ -618,8 +686,28 @@ function Write-AnswersToFile {
     Write-Warn ("Failed to create backup for {0}: {1}" -f $Path, $_.Exception.Message)
   }
 
-  [System.IO.File]::WriteAllText($Path, $newContent, [System.Text.Encoding]::UTF8)
+  $encoding = Get-FileEncoding -Path $Path
+  [System.IO.File]::WriteAllText($Path, $newContent, $encoding)
   return $true
+}
+
+function Write-AiResponses {
+  param([string]$Path,[string[]]$Responses)
+
+  $responsesArray = @($Responses)
+  if ($responsesArray.Count -eq 0) { return }
+
+  $name = [System.IO.Path]::GetFileName($Path)
+  Write-Info ("AI response(s) for {0}:" -f $name)
+
+  $index = 1
+  foreach ($resp in $responsesArray) {
+    if ($responsesArray.Count -gt 1) {
+      Write-Info ("Response #{0}:" -f $index)
+    }
+    Write-Info ($resp.Trim())
+    $index++
+  }
 }
 
 function Invoke-Apply {
@@ -659,6 +747,8 @@ function Invoke-Apply {
       $manual++
       continue
     }
+
+    Write-AiResponses -Path $file.FullName -Responses $outcome.Responses
 
     if ($outcome.Status -eq 'Answered') {
       if (Write-AnswersToFile -Path $file.FullName -Original $content -Answers $outcome.Answers) {
