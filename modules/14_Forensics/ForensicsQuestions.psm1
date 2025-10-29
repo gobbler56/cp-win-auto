@@ -657,27 +657,34 @@ function Write-AnswersToFile {
 
   if (-not $Answers -or $Answers.Count -eq 0) { return $false }
 
-  $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
-    param([System.Text.RegularExpressions.Match]$match)
+  $matches = $script:PlaceholderRegex.Matches($Original)
+  if (-not $matches -or $matches.Count -eq 0) { return $false }
 
-    $indent = $match.Groups['indent'].Value
-    $prefix = $match.Groups['prefix'].Value
-    $normalizedPrefix = if ($prefix) { $prefix } else { 'ANSWER: ' }
-    $suffix = $match.Groups['suffix'].Value
+  $target = $matches[$matches.Count - 1]
 
-    $lines = @()
-    foreach ($answer in $Answers) {
-      $lines += "$indent$normalizedPrefix$answer"
-    }
+  $indent = $target.Groups['indent'].Value
+  $prefix = $target.Groups['prefix'].Value
+  $normalizedPrefix = if ($prefix) { $prefix } else { 'ANSWER: ' }
+  $suffix = $target.Groups['suffix'].Value
 
-    if ($lines.Count -gt 0 -and $suffix) {
-      $lines[$lines.Count - 1] = "$($lines[$lines.Count - 1])$suffix"
-    }
-
-    return ($lines -join "`r`n")
+  $lines = @()
+  foreach ($answer in $Answers) {
+    $lines += "$indent$normalizedPrefix$answer"
   }
 
-  $newContent = $script:PlaceholderRegex.Replace($Original, $evaluator, 1)
+  if ($lines.Count -gt 0 -and $suffix) {
+    $lines[$lines.Count - 1] = "$($lines[$lines.Count - 1])$suffix"
+  }
+
+  $replacement = $lines -join "`r`n"
+
+  $startIndex = $target.Index
+  $length = $target.Length
+  $before = if ($startIndex -gt 0) { $Original.Substring(0, $startIndex) } else { '' }
+  $afterIndex = $startIndex + $length
+  $after = if ($afterIndex -lt $Original.Length) { $Original.Substring($afterIndex) } else { '' }
+
+  $newContent = [string]::Concat($before, $replacement, $after)
   if ($newContent -eq $Original) { return $false }
 
   $backup = "$Path.bak"
