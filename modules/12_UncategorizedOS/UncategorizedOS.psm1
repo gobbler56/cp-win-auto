@@ -28,10 +28,24 @@ foreach ($name in @('ADMIN$','IPC$','C$','D$','E$','F$','G$','H$','PRINT$','FAX$
   [void]$script:DefaultShareNames.Add($name)
 }
 
+# ---- Helpers -----------------------------------------------------------------
+
 function Get-OpenRouterApiKey {
   $key = [System.Environment]::GetEnvironmentVariable($script:ApiKeyEnvVar)
   if (-not $key) { return '' }
   return $key
+}
+
+function Get-OSVersionInfo {
+  # Returns [pscustomobject] with Major, Minor, Build; Win7=6.1, Win8=6.2, Win10+=10.0
+  $v = [System.Environment]::OSVersion.Version
+  [pscustomobject]@{ Major=$v.Major; Minor=$v.Minor; Build=$v.Build; Raw=$v }
+}
+
+function Is-LegacyGadgetOS {
+  # Gadgets existed through Win7 (6.1). From 6.2+ (Win8+), they’re gone.
+  $os = Get-OSVersionInfo
+  return (($os.Major -lt 6) -or ($os.Major -eq 6 -and $os.Minor -le 1))
 }
 
 function Ensure-RegistryValue {
@@ -41,39 +55,16 @@ function Ensure-RegistryValue {
     [Parameter(Mandatory)][ValidateSet('String','ExpandString','MultiString','Binary','DWord','QWord')][string]$Type,
     [Parameter(Mandatory)][object]$Value
   )
-
-  if (-not (Test-Path $Path)) {
-    New-Item -Path $Path -Force | Out-Null
-  }
-
-  $current = (Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue).$Name
-  if ($Type -eq 'DWord') { $Value = [int]$Value }
-  elseif ($Type -eq 'QWord') { $Value = [long]$Value }
-
-  if ($null -ne $current) {
-    if ($current -is [byte[]] -and $Value -is [byte[]]) {
-      if ($current.Length -eq $Value.Length) {
-        $different = $false
-        for ($i = 0; $i -lt $current.Length; $i++) {
-          if ($current[$i] -ne $Value[$i]) { $different = $true; break }
-        }
-        if (-not $different) { return $false }
-      } elseif ($current.Length -eq 0 -and $Value.Length -eq 0) {
-        return $false
-      }
-    } elseif ([string]::Equals([string]$current, [string]$Value, [System.StringComparison]::OrdinalIgnoreCase)) {
-      return $false
-    } elseif ($current -eq $Value) {
-      return $false
-    }
-  }
-
   try {
-    if ($null -eq $current) {
-      New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
-    } else {
-      Set-ItemProperty -Path $Path -Name $Name -Value $Value
+    if (-not (Test-Path $Path)) {
+      New-Item -Path $Path -Force | Out-Null
     }
+    # Normalize numeric types
+    if ($Type -eq 'DWord') { $Value = [int]$Value }
+    elseif ($Type -eq 'QWord') { $Value = [long]$Value }
+
+    # Use New-ItemProperty -Force universally (creates or updates) to avoid "property not found"
+    New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
     return $true
   } catch {
     Write-Warn ("Failed to set {0}\{1}: {2}" -f $Path, $Name, $_.Exception.Message)
@@ -86,6 +77,8 @@ function Get-RegistryValueSafe {
   try { return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name }
   catch { return $null }
 }
+
+# ---- Settings: RDP / Remote Assistance --------------------------------------
 
 function Disable-RemoteDesktopFeatures {
   $changed = $false
@@ -101,7 +94,10 @@ function Test-RemoteDesktopDisabled {
   return ($deny -and $assist)
 }
 
+# ---- Settings: Desktop Gadgets (legacy only) --------------------------------
+
 function Disable-DesktopGadgets {
+  if (-not (Is-LegacyGadgetOS)) { return $false }  # Skip on Win8+ to avoid bogus keys/errors
   $path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Windows\Sidebar'
   $changed = $false
   $changed = (Ensure-RegistryValue -Path $path -Name 'TurnOffSidebar' -Type 'DWord' -Value 1) -or $changed
@@ -110,9 +106,12 @@ function Disable-DesktopGadgets {
 }
 
 function Test-DesktopGadgetsDisabled {
+  if (-not (Is-LegacyGadgetOS)) { return $true } # Treated as compliant on modern OS
   $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Windows\Sidebar' -Name 'TurnOffSidebar'
   return ($value -eq 1)
 }
+
+# ---- Settings: DEP / Process mitigations ------------------------------------
 
 function Set-DepPolicy {
   $changed = $false
@@ -152,6 +151,8 @@ function Test-DepPolicy {
   return $false
 }
 
+# ---- Settings: UAC CredUI enumeration ---------------------------------------
+
 function Set-UacAdministratorEnumeration {
   return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\CredUI' -Name 'EnumerateAdministrators' -Type 'DWord' -Value 0)
 }
@@ -159,6 +160,8 @@ function Set-UacAdministratorEnumeration {
 function Test-UacAdministratorEnumeration {
   return ((Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\CredUI' -Name 'EnumerateAdministrators') -eq 0)
 }
+
+# ---- Settings: Screen saver enforcement --------------------------------------
 
 function Ensure-ScreenSaverPolicy {
   $changed = $false
@@ -192,6 +195,8 @@ function Test-ScreenSaverPolicy {
   return ($policy -eq '1')
 }
 
+# ---- Settings: AutoRun / AutoPlay -------------------------------------------
+
 function Ensure-AutorunDisabled {
   $changed = $false
   $paths = @(
@@ -223,6 +228,8 @@ function Ensure-AutoplayDisabled {
 
   return $changed
 }
+
+# ---- Settings: ASLR / Memory mitigations ------------------------------------
 
 function Ensure-MemoryMitigations {
   $changed = $false
@@ -282,12 +289,16 @@ function Ensure-HeapMitigationOptions {
   return (Ensure-RegistryValue -Path $kernelPath -Name 'MitigationOptions' -Type 'Binary' -Value $expected)
 }
 
+# ---- Settings: Networking ----------------------------------------------------
+
 function Ensure-IpSourceRoutingDisabled {
   $changed = $false
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   return $changed
 }
+
+# ---- Filesystem ACL hardening -----------------------------------------------
 
 function Remove-IdentityWriteAccess {
   param(
@@ -335,44 +346,13 @@ function Remove-IdentityWriteAccess {
 
 function Ensure-DirectoryRestrictions {
   $changed = $false
-  if (Test-Path 'C:\\Share') {
-    if (Remove-IdentityWriteAccess -Path 'C:\\Share' -Identity 'Everyone') { $changed = $true }
-  }
-  if (Test-Path 'C:\\inetpub') {
-    if (Remove-IdentityWriteAccess -Path 'C:\\inetpub' -Identity 'Everyone') { $changed = $true }
-  }
-  if (Test-Path 'C:\\Windows\\NTDS') {
-    if (Remove-IdentityWriteAccess -Path 'C:\\Windows\\NTDS' -Identity 'Domain Users') { $changed = $true }
-  }
+  if (Test-Path 'C:\Share')       { if (Remove-IdentityWriteAccess -Path 'C:\Share'       -Identity 'Everyone')     { $changed = $true } }
+  if (Test-Path 'C:\inetpub')     { if (Remove-IdentityWriteAccess -Path 'C:\inetpub'     -Identity 'Everyone')     { $changed = $true } }
+  if (Test-Path 'C:\Windows\NTDS'){ if (Remove-IdentityWriteAccess -Path 'C:\Windows\NTDS'-Identity 'Domain Users'){ $changed = $true } }
   return $changed
 }
 
-function Ensure-ShareRestrictions {
-  $changed = $false
-  $script:LastRemovedShares = @()
-
-  try {
-    $removedShares = Remove-NonDefaultSharesWithAi
-    if ($removedShares.Count -gt 0) {
-      $script:LastRemovedShares = $removedShares
-      $changed = $true
-    }
-  } catch {
-    Write-Warn ("Failed to audit SMB shares with AI: {0}" -f $_.Exception.Message)
-  }
-
-  if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
-    try {
-      $access = Get-SmbShareAccess -Name 'SYSVOL' -ErrorAction Stop | Where-Object { $_.AccountName -eq 'Everyone' }
-      if ($access) {
-        Revoke-SmbShareAccess -Name 'SYSVOL' -AccountName 'Everyone' -Force -Confirm:$false -ErrorAction Stop
-        $changed = $true
-      }
-    } catch {}
-  }
-
-  return $changed
-}
+# ---- SMB share auditing/removal (with AI allowlist from README) --------------
 
 function Remove-SpecificShare {
   param([string]$Name)
@@ -397,9 +377,9 @@ function Remove-SpecificShare {
 }
 
 function Get-ReadMeContent {
-  $candidates = @('C:\\CyberPatriot\\README.url')
-  if ($env:PUBLIC) { $candidates += (Join-Path $env:PUBLIC 'Desktop\\README.url') }
-  if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'Desktop\\README.url') }
+  $candidates = @('C:\CyberPatriot\README.url')
+  if ($env:PUBLIC)      { $candidates += (Join-Path $env:PUBLIC      'Desktop\README.url') }
+  if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'Desktop\README.url') }
 
   foreach ($candidate in $candidates) {
     if (-not $candidate) { continue }
@@ -444,7 +424,7 @@ function Get-ShareInventory {
       $output = & net share 2>$null
       if ($LASTEXITCODE -eq 0 -and $output) {
         foreach ($line in $output) {
-          if ($line -match '^\\s*$') { continue }
+          if ($line -match '^\s*$') { continue }
           if ($line -match '^Share name') { continue }
           if ($line -match '^---') { continue }
           if ($line -match '^The command completed successfully') { break }
@@ -507,7 +487,18 @@ Respond with JSON only.
       @{ role = 'system'; content = $systemPrompt },
       @{ role = 'user'; content = $userPrompt }
     )
-    response_format = @{ type = 'json_schema'; json_schema = @{ name = 'share_plan'; schema = @{ type = 'object'; required = @('allowed'); additionalProperties = $false; properties = @{ allowed = @{ type = 'array'; items = @{ type = 'string' } } } } } }
+    response_format = @{
+      type = 'json_schema'
+      json_schema = @{
+        name   = 'share_plan'
+        schema = @{
+          type                 = 'object'
+          required             = @('allowed')
+          additionalProperties = $false
+          properties           = @{ allowed = @{ type = 'array'; items = @{ type = 'string' } } }
+        }
+      }
+    }
   }
 
   return ($body | ConvertTo-Json -Depth 10)
@@ -587,6 +578,33 @@ function Remove-NonDefaultSharesWithAi {
   return $removed
 }
 
+function Ensure-ShareRestrictions {
+  $changed = $false
+  $script:LastRemovedShares = @()
+
+  try {
+    $removedShares = Remove-NonDefaultSharesWithAi
+    if ($removedShares.Count -gt 0) {
+      $script:LastRemovedShares = $removedShares
+      $changed = $true
+    }
+  } catch {
+    Write-Warn ("Failed to audit SMB shares with AI: {0}" -f $_.Exception.Message)
+  }
+
+  if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
+    try {
+      $access = Get-SmbShareAccess -Name 'SYSVOL' -ErrorAction Stop | Where-Object { $_.AccountName -eq 'Everyone' }
+      if ($access) {
+        Revoke-SmbShareAccess -Name 'SYSVOL' -AccountName 'Everyone' -Force -Confirm:$false -ErrorAction Stop
+        $changed = $true
+      }
+    } catch {}
+  }
+
+  return $changed
+}
+
 function Test-UnauthorizedShares {
   $shares = Get-ShareInventory
   if (-not $shares) { return $true }
@@ -597,23 +615,25 @@ function Test-UnauthorizedShares {
   return $true
 }
 
+# ---- Driver: Apply / Verify --------------------------------------------------
+
 function Apply-AllSettings {
   $changes = @()
 
   if (Disable-RemoteDesktopFeatures) { $changes += 'Disabled Remote Desktop/Assistance' }
-  if (Disable-DesktopGadgets) { $changes += 'Disabled desktop gadgets' }
-  if (Set-DepPolicy) { $changes += 'Configured DEP for all programs' }
+  if (Disable-DesktopGadgets)       { $changes += 'Disabled desktop gadgets (legacy OS)' }
+  if (Set-DepPolicy)                { $changes += 'Configured DEP for all programs' }
   if (Set-UacAdministratorEnumeration) { $changes += 'Disabled UAC administrator enumeration' }
-  if (Ensure-ScreenSaverPolicy) { $changes += 'Enforced secure screen saver' }
-  if (Ensure-AutorunDisabled) { $changes += 'Disabled AutoRun' }
-  if (Ensure-AutoplayDisabled) { $changes += 'Disabled AutoPlay' }
-  if (Ensure-MemoryMitigations) { $changes += 'Enabled ASLR mitigations' }
-  if (Ensure-EarlyLaunchPolicy) { $changes += 'Restricted ELAM driver loading' }
+  if (Ensure-ScreenSaverPolicy)     { $changes += 'Enforced secure screen saver' }
+  if (Ensure-AutorunDisabled)       { $changes += 'Disabled AutoRun' }
+  if (Ensure-AutoplayDisabled)      { $changes += 'Disabled AutoPlay' }
+  if (Ensure-MemoryMitigations)     { $changes += 'Enabled ASLR mitigations' }
+  if (Ensure-EarlyLaunchPolicy)     { $changes += 'Restricted ELAM driver loading' }
   if (Ensure-ValidateHeapIntegrity) { $changes += 'Enabled heap integrity validation' }
   if (Ensure-HeapMitigationOptions) { $changes += 'Updated mitigation options' }
-  if (Ensure-IpSourceRoutingDisabled) { $changes += 'Disabled IP source routing' }
+  if (Ensure-IpSourceRoutingDisabled){ $changes += 'Disabled IP source routing' }
   if (Ensure-DirectoryRestrictions) { $changes += 'Hardened directory ACLs' }
-  if (Ensure-ShareRestrictions) { $changes += 'Updated share restrictions' }
+  if (Ensure-ShareRestrictions)     { $changes += 'Updated share restrictions' }
 
   if ($script:LastRemovedShares.Count -gt 0) {
     $changes += ("Removed non-default shares: {0}" -f ($script:LastRemovedShares -join ', '))
@@ -637,7 +657,7 @@ function Invoke-Apply {
 
   $changes = Apply-AllSettings
   $message = if ($changes.Count -gt 0) { $changes -join '; ' } else { 'All settings already compliant.' }
-  $status = if ($changes.Count -gt 0) { 'Succeeded' } else { 'Succeeded' }
+  $status = 'Succeeded'
   return New-ModuleResult -Name $script:ModuleName -Status $status -Message $message
 }
 
