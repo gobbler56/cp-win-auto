@@ -17,6 +17,61 @@ function Remove-HTMLTags {
   return $content.Trim()
 }
 
+function Find-RecentHireMentions {
+  param(
+    [string]$PlainText,
+    [System.Collections.Generic.HashSet[string]]$TerminatedSet = $(New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase))
+  )
+
+  $results = @()
+  if (-not $PlainText) { return $results }
+
+  if (-not $TerminatedSet) {
+    $TerminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  }
+
+  $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  $sentences = [regex]::Split($PlainText, '(?<=[\.\?\!])\s+|\r?\n+')
+  foreach ($sentence in $sentences) {
+    $s = ($sentence -as [string]).Trim()
+    if (-not $s) { continue }
+    if ($s -notmatch '(?i)\b(create|make|add|set\s*up|setup)\b') { continue }
+    if ($s -notmatch '(?i)\b(user|account)\b') { continue }
+
+    $name = $null
+    if ($s -match '(?i)\b(?:named|called|name(?:d)?\s+(?:as|for|after)?)\s+[""''“”]?([A-Za-z0-9._-]+)[""''“”]?') {
+      $name = $matches[1]
+    } elseif ($s -match '(?i)\buser\s+[""''“”]?([A-Za-z0-9._-]+)[""''“”]?') {
+      $name = $matches[1]
+    } elseif ($s -match '(?i)\baccount\s+[""''“”]?([A-Za-z0-9._-]+)[""''“”]?') {
+      $name = $matches[1]
+    }
+
+    if (-not $name) { continue }
+    $name = $name.Trim('"', '\'', "“", "”")
+    if (-not $name) { continue }
+    if ($name -match '^(?:user|account|employee|admin|administrator)$') { continue }
+    if ($TerminatedSet.Contains($name)) { continue }
+
+    if ($seen.Add($name)) {
+      $accountType = 'standard'
+      if ($s -match '(?i)\badmin(?:istrator)?\b') {
+        $accountType = 'admin'
+      } elseif ($s -match '(?i)\bstandard\b') {
+        $accountType = 'standard'
+      }
+
+      $results += [pscustomobject]@{
+        Name        = $name
+        AccountType = $accountType
+        Groups      = @()
+      }
+    }
+  }
+
+  return $results
+}
+
 function Get-ReadmeHtmlFromUrlFile {
   param([string[]]$Candidates = @(
     "C:\CyberPatriot\README.url",
@@ -123,6 +178,19 @@ function Get-ReadmeInfo {
           }
         }
 
+        foreach ($entry in (Find-RecentHireMentions -PlainText $plainText -TerminatedSet $terminatedSet)) {
+          if (-not $entry.Name) { continue }
+          if (-not ($recent | Where-Object { $_.Name -eq $entry.Name })) {
+            $recent += [pscustomobject]@{
+              Name        = $entry.Name
+              AccountType = $entry.AccountType
+              Groups      = @($entry.Groups)
+            }
+          }
+          $users += $entry.Name
+          if ($entry.AccountType -eq 'admin') { $admins += $entry.Name }
+        }
+
         $directives = [ordered]@{
           GroupsToCreate            = @($groups.Keys | Select-Object -Unique)
           GroupMembersToAdd         = @{}
@@ -150,14 +218,24 @@ function Get-ReadmeInfo {
   }
 
   # Fallback: empty structure
+  $heuristicRecent = Find-RecentHireMentions -PlainText $plainText
+  $heuristicUsers  = @()
+  $heuristicAdmins = @()
+  foreach ($entry in $heuristicRecent) {
+    if ($entry.Name) {
+      $heuristicUsers += $entry.Name
+      if ($entry.AccountType -eq 'admin') { $heuristicAdmins += $entry.Name }
+    }
+  }
+
   return [pscustomobject]@{
-    AuthorizedUsers  = @()
-    AuthorizedAdmins = @()
+    AuthorizedUsers  = @($heuristicUsers | Select-Object -Unique)
+    AuthorizedAdmins = @($heuristicAdmins | Select-Object -Unique)
     Notes            = @()
     Directives       = [pscustomobject]@{
       GroupsToCreate            = @()
       GroupMembersToAdd         = @{}
-      UsersToCreate             = @()
+      UsersToCreate             = @($heuristicRecent)
       TerminatedUsers           = @()
       CriticalServices          = @()
       UnauthorizedUsersExplicit = @()
