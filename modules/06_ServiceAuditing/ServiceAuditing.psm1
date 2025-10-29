@@ -42,21 +42,10 @@ function Build-ServiceAiRequest {
 You are an assistant that configures Windows services for CyberPatriot scoring.
 Decide which services must be enabled or disabled to comply with the README instructions.
 Only reference service names that appear in the provided inventory (Name column).
-Return ONLY a JSON object with this schema:
-{ "enable": ["ServiceName"], "disable": ["ServiceName"] }
-Use `enable` for services that must be running/automatic, and `disable` for services that must be stopped/disabled.
-If the README does not mention a service, leave it out of both arrays.
+Respond strictly with JSON in the format { "enable": ["ServiceName"], "disable": ["ServiceName"] }.
+Use `enable` for services that must run automatically and `disable` for services that must be stopped/disabled.
+Leave services out of both arrays when the README provides no instruction about them.
 "@
-
-  $schema = @{
-    type = 'object'
-    additionalProperties = $false
-    required = @('enable','disable')
-    properties = @{
-      enable = @{ type = 'array'; items = @{ type = 'string' } }
-      disable = @{ type = 'array'; items = @{ type = 'string' } }
-    }
-  }
 
   $lines = @()
   $max = [math]::Min($Inventory.Count, $script:ServicePlanMaxServices)
@@ -69,34 +58,28 @@ If the README does not mention a service, leave it out of both arrays.
   }
   $inventoryBlock = ($lines -join [Environment]::NewLine)
 
-  $messages = @(
-    @{ role = 'system'; content = $systemPrompt },
-    @{ role = 'user'; content = @"
+  $userPrompt = @"
 README CONTENT:
 $ReadmeText
 
 SERVICE INVENTORY:
 $inventoryBlock
 
-Respond with JSON only.
-"@ }
-  )
+Only output valid JSON for the directive object.
+"@
 
   $body = @{
-    model = $script:ServicePlanModel
+    model       = $script:ServicePlanModel
     temperature = 0
-    top_p = 1
-    messages = $messages
-    response_format = @{
-      type = 'json_schema'
-      json_schema = @{
-        name = 'service_plan'
-        schema = $schema
-      }
-    }
+    top_p       = 1
+    max_tokens  = 2000
+    messages    = @(
+      @{ role = 'system'; content = $systemPrompt },
+      @{ role = 'user'; content = $userPrompt }
+    )
   }
 
-  return ($body | ConvertTo-Json -Depth 10)
+  return ($body | ConvertTo-Json -Depth 6)
 }
 
 function Invoke-ServicePlan {
@@ -116,15 +99,22 @@ function Invoke-ServicePlan {
   $headers = @{
     'Authorization' = "Bearer $apiKey"
     'Content-Type'  = 'application/json'
-    'X-Title'       = 'CP-Service-Planning'
   }
 
-  $response = Invoke-RestMethod -Method Post -Uri $script:ServicePlanEndpoint -Headers $headers -Body $body -ErrorAction Stop
+  try {
+    $response = Invoke-RestMethod -Uri $script:ServicePlanEndpoint -Method Post -Headers $headers -Body $body -ErrorAction Stop
+  } catch {
+    throw ("OpenRouter request failed: {0}" -f $_.Exception.Message)
+  }
   $content = $response.choices[0].message.content
   if (-not $content) { throw 'OpenRouter returned empty content' }
   if ($content -match '^\s*```') { $content = ($content -replace '^\s*```(?:json)?','' -replace '```\s*$','').Trim() }
 
-  $parsed = $content | ConvertFrom-Json
+  try {
+    $parsed = $content | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw ("Failed to parse OpenRouter response: {0}" -f $_.Exception.Message)
+  }
   if (-not $parsed) { return $null }
 
   $enable = @()
