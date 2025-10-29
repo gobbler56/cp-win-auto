@@ -20,17 +20,17 @@ function Remove-HTMLTags {
 function Find-RecentHireMentions {
   param(
     [string]$PlainText,
-    [System.Collections.Generic.HashSet[string]]$TerminatedSet = $(New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase))
+    [System.Collections.Generic.HashSet[string]]$TerminatedSet = $(New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase))
   )
 
   $results = @()
   if (-not $PlainText) { return $results }
 
   if (-not $TerminatedSet) {
-    $TerminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    $TerminatedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
   }
 
-  $seen = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
   $sentences = [regex]::Split($PlainText, '(?<=[\.\?\!])\s+|\r?\n+')
   foreach ($sentence in $sentences) {
     $s = ($sentence -as [string]).Trim()
@@ -138,7 +138,7 @@ function Get-ReadmeInfo {
         $users  = @()
         $groups = @{}
         $terminatedRaw = @($doc.terminated_users) | Where-Object { $_ }
-        $terminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        $terminatedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $terminated = @()
         foreach ($t in $terminatedRaw) {
           $name = ($t -as [string]).Trim()
