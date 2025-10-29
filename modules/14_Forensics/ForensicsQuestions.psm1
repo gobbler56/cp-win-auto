@@ -14,9 +14,10 @@ $script:OpenRouterModel       = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MOD
 $script:OpenRouterMaxTokens   = 6000
 $script:QuestionPattern       = 'Forensics Question *.txt'
 $script:PlaceholderPattern    = '^(?<indent>\s*)(?<prefix>ANSWER:\s*)(?<placeholder><Type Answer Here>)(?<suffix>\s*)$'
-$script:PlaceholderRegex      = New-Object System.Text.RegularExpressions.Regex(
+$script:PlaceholderRegexOptions = [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, Multiline'
+$script:PlaceholderRegex        = [System.Text.RegularExpressions.Regex]::new(
   $script:PlaceholderPattern,
-  [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  $script:PlaceholderRegexOptions
 )
 $script:MaxCommandOutputBytes = 200 * 1024
 $script:MaxCommandRequests    = 6
