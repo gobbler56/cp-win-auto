@@ -84,33 +84,40 @@ Only output valid JSON for the directive object.
 }
 
 function Get-ServicePlanContentText {
-  param(
-    $Content
-  )
+  param($Content)
 
   if ($null -eq $Content) { return '' }
-  if ($Content -is [string]) { return [string]$Content }
 
-  if ($Content.PSObject) {
-    if ($Content.PSObject.Properties.Name -contains 'value') {
-      return Get-ServicePlanContentText -Content $Content.value
+  if ($Content -is [string]) { return $Content }
+
+  if ($Content -is [System.Management.Automation.PSObject] -or
+      $Content -is [hashtable]) {
+
+    foreach ($key in 'text','value') {
+      if ($Content.PSObject.Properties.Name -contains $key) {
+        return Get-ServicePlanContentText -Content $Content.$key
+      }
     }
-    if ($Content.PSObject.Properties.Name -contains 'text') {
-      return Get-ServicePlanContentText -Content $Content.text
-    }
+
     if ($Content.PSObject.Properties.Name -contains 'content') {
       return Get-ServicePlanContentText -Content $Content.content
     }
+
+    if ($Content.PSObject.Properties.Name -contains 'json') {
+      $raw = $Content.json
+      if ($raw -is [string]) {
+        return $raw
+      }
+      return ($raw | ConvertTo-Json -Depth 10)
+    }
   }
 
-  if ($Content -is [System.Collections.IEnumerable]) {
-    $fragments = foreach ($item in $Content) {
-      $fragment = Get-ServicePlanContentText -Content $item
-      $fragmentString = [string]$fragment
-      if (-not [string]::IsNullOrWhiteSpace($fragmentString)) { $fragmentString }
+  if ($Content -is [System.Collections.IEnumerable] -and -not ($Content -is [string])) {
+    $pieces = foreach ($part in $Content) {
+      $text = Get-ServicePlanContentText -Content $part
+      if (-not [string]::IsNullOrWhiteSpace($text)) { $text }
     }
-    if (-not $fragments) { return '' }
-    return (($fragments -join [Environment]::NewLine).Trim())
+    return ($pieces -join [Environment]::NewLine)
   }
 
   return [string]$Content
@@ -154,12 +161,20 @@ function Invoke-ServicePlan {
   }
 
   $content = Get-ServicePlanContentText -Content $rawContent
+
+  if ($content -isnot [string]) {
+    $content = ($content | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+  }
+
   if ([string]::IsNullOrWhiteSpace($content)) { throw 'OpenRouter returned empty content' }
+
+  if ($content -match '^\s*```') {
+    $content = ($content -replace '^\s*```(?:json)?','' -replace '```\s*$','')
+  }
   $content = $content.Trim()
-  if ($content -match '^\s*```') { $content = ($content -replace '^\s*```(?:json)?','' -replace '```\s*$','').Trim() }
 
   try {
-    $parsed = $content | ConvertFrom-Json -ErrorAction Stop
+    $parsed = ConvertFrom-Json -InputObject $content -ErrorAction Stop
   } catch {
     throw ("Failed to parse OpenRouter response: {0}" -f $_.Exception.Message)
   }
