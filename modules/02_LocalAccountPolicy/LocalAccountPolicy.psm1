@@ -30,11 +30,18 @@ function Test-Ready {
 function Invoke-CopyTree {
   param(
     [Parameter(Mandatory)][string]$Source,
-    [Parameter(Mandatory)][string]$Destination
+    [Parameter(Mandatory)][string]$Destination,
+    [int]$RetryCount = 1,
+    [int]$RetryWaitSeconds = 1,
+    [string[]]$ExcludePatterns = @()
   )
 
   if (-not (Test-Path $Source)) {
     throw ("Source path not found: {0}" -f $Source)
+  }
+
+  if (-not (Test-Path $Destination)) {
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
   }
 
   $robo = Get-Command 'robocopy.exe' -ErrorAction SilentlyContinue
@@ -43,8 +50,8 @@ function Invoke-CopyTree {
       $Source,
       $Destination,
       '/E',
-      '/R:1',
-      '/W:1',
+      ("/R:{0}" -f $RetryCount),
+      ("/W:{0}" -f $RetryWaitSeconds),
       '/NFL',
       '/NDL',
       '/NJH',
@@ -52,12 +59,29 @@ function Invoke-CopyTree {
       '/NP'
     )
 
+    if ($ExcludePatterns.Count -gt 0) {
+      $args += '/XF'
+      $args += $ExcludePatterns
+    }
+
     $proc = Start-Process -FilePath $robo.Source -ArgumentList $args -NoNewWindow -Wait -PassThru
     if ($proc.ExitCode -gt 7) {
       throw ("robocopy failed with exit code {0}" -f $proc.ExitCode)
     }
   } else {
-    Copy-Item -Path $Source -Destination $Destination -Recurse -Force -ErrorAction Stop
+    $copyParams = @{
+      Path        = $Source
+      Destination = $Destination
+      Recurse     = $true
+      Force       = $true
+      ErrorAction = 'Stop'
+    }
+
+    if ($ExcludePatterns.Count -gt 0) {
+      $copyParams['Exclude'] = $ExcludePatterns
+    }
+
+    Copy-Item @copyParams
   }
 }
 
@@ -100,9 +124,13 @@ function Invoke-PolicyImport {
   Invoke-CopyTree -Source $groupPolicySource -Destination 'C:\\Windows\\System32\\GroupPolicy'
 
   if (Test-Path $policyDefSource) {
-    Write-Info 'Copying PolicyDefinitions into Windows directory'
+    Write-Info 'Copying PolicyDefinitions into Windows directory (skipping .admx due to known access restrictions)'
     try {
-      Invoke-CopyTree -Source $policyDefSource -Destination 'C:\\Windows\\PolicyDefinitions'
+      Invoke-CopyTree `
+        -Source $policyDefSource `
+        -Destination 'C:\\Windows\\PolicyDefinitions' `
+        -RetryWaitSeconds 0 `
+        -ExcludePatterns @('*.admx')
     } catch {
       Write-Warn ("PolicyDefinitions copy reported issues: {0}" -f $_.Exception.Message)
     }
