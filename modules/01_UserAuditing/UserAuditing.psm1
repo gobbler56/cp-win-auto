@@ -180,7 +180,7 @@ function Invoke-Apply {
       [void](Set-LocalUserCanChangePassword -Name $u -CanChange:$true)
       Write-Ok "Hardened user $u"
     } catch {
-      Write-Warn "Failed to harden $u: $($_.Exception.Message)"
+      Write-Warn "Failed to harden ${u}: $($_.Exception.Message)"
     }
   }
 
