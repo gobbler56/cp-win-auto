@@ -264,7 +264,7 @@ function Limit-Output {
 function Split-CommandLine {
   param([string]$Command)
 
-  $parts = New-Object System.Collections.Generic.List[string]
+  $parts = New-Object 'System.Collections.Generic.List[string]'
   if ([string]::IsNullOrWhiteSpace($Command)) { return @() }
 
   $current = New-Object System.Text.StringBuilder
@@ -299,7 +299,7 @@ function Split-CommandLine {
   }
 
   if ($current.Length -gt 0) { $parts.Add($current.ToString()) | Out-Null }
-  return @($parts)
+  return $parts.ToArray()
 }
 
 function Read-FileSample {
@@ -521,7 +521,7 @@ function Invoke-AllowedCommand {
 function Execute-RequestedCommands {
   param([string[]]$Requests)
 
-  $results = New-Object System.Collections.Generic.List[object]
+  $results = New-Object 'System.Collections.Generic.List[object]'
   if (-not $Requests) { return @() }
 
   $count = 0
@@ -534,7 +534,7 @@ function Execute-RequestedCommands {
     [void]$results.Add((Invoke-AllowedCommand -Command $req))
   }
 
-  return @($results)
+  return $results.ToArray()
 }
 
 function Build-CommandResultsPrompt {
