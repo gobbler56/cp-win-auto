@@ -11,6 +11,7 @@ if (-not (Get-Command New-ModuleResult -EA SilentlyContinue)) {
 $script:ServicePlanModel        = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5' }
 $script:ServicePlanMaxServices  = 200
 $script:ServicePlanEndpoint     = 'https://openrouter.ai/api/v1/chat/completions'
+$script:ServicePlanMaxTokens    = 6000
 
 function ConvertTo-PlainText {
   param([string]$Html)
@@ -72,7 +73,7 @@ Only output valid JSON for the directive object.
     model       = $script:ServicePlanModel
     temperature = 0
     top_p       = 1
-    max_tokens  = 2000
+    max_tokens  = $script:ServicePlanMaxTokens
     messages    = @(
       @{ role = 'system'; content = $systemPrompt },
       @{ role = 'user'; content = $userPrompt }
