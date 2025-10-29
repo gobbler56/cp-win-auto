@@ -11,17 +11,7 @@ $script:ModuleName            = 'ForensicsQuestions'
 $script:ApiUrl                = 'https://openrouter.ai/api/v1/chat/completions'
 $script:ApiKeyEnvVar          = 'OPENROUTER_API_KEY'
 $script:OpenRouterModel       = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5' }
-$script:OpenRouterMaxTokens   = {
-  $default = 4000
-  if (-not $env:OPENROUTER_MAX_TOKENS) { return $default }
-
-  $parsed = 0
-  if ([int]::TryParse($env:OPENROUTER_MAX_TOKENS, [ref]$parsed)) {
-    if ($parsed -gt 0) { return $parsed }
-  }
-
-  return $default
-}.Invoke()
+$script:OpenRouterMaxTokens   = 6000
 $script:QuestionPattern       = 'Forensics Question *.txt'
 $script:PlaceholderPattern    = '^(ANSWER:\s*)(<Type Answer Here>)(\s*)$'
 $script:PlaceholderRegex      = New-Object System.Text.RegularExpressions.Regex($script:PlaceholderPattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
