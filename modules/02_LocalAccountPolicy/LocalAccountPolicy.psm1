@@ -40,8 +40,8 @@ function Invoke-CopyTree {
   $robo = Get-Command 'robocopy.exe' -ErrorAction SilentlyContinue
   if ($robo) {
     $args = @(
-      '"{0}"' -f $Source,
-      '"{0}"' -f $Destination,
+      $Source,
+      $Destination,
       '/E',
       '/R:1',
       '/W:1',
