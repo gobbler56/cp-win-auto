@@ -64,9 +64,10 @@ function Invoke-CopyTree {
       $args += $ExcludePatterns
     }
 
-    $proc = Start-Process -FilePath $robo.Source -ArgumentList $args -NoNewWindow -Wait -PassThru
-    if ($proc.ExitCode -gt 7) {
-      throw ("robocopy failed with exit code {0}" -f $proc.ExitCode)
+    $null = & $robo.Source @args 2>&1 | Out-Null
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -gt 7) {
+      throw ("robocopy failed with exit code {0}" -f $exitCode)
     }
   } else {
     $copyParams = @{
@@ -124,13 +125,13 @@ function Invoke-PolicyImport {
   Invoke-CopyTree -Source $groupPolicySource -Destination 'C:\\Windows\\System32\\GroupPolicy'
 
   if (Test-Path $policyDefSource) {
-    Write-Info 'Copying PolicyDefinitions into Windows directory (skipping .admx due to known access restrictions)'
+    Write-Info 'Copying PolicyDefinitions into Windows directory (skipping .admx/.adml due to known access restrictions)'
     try {
       Invoke-CopyTree `
         -Source $policyDefSource `
         -Destination 'C:\\Windows\\PolicyDefinitions' `
         -RetryWaitSeconds 0 `
-        -ExcludePatterns @('*.admx')
+        -ExcludePatterns @('*.admx', '*.adml')
     } catch {
       Write-Warn ("PolicyDefinitions copy reported issues: {0}" -f $_.Exception.Message)
     }
