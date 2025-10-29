@@ -344,7 +344,7 @@ You are reviewing potential prohibited files on a Windows host.
 README CONTENT:
 $ReadmeText
 
-PROHIBITED FILE CANDIDATES (first $($Summaries.Count) entries):
+PROHIBITED FILE CANDIDATES ($($Summaries.Count) entries):
 $inventoryBlock
 
 Return ONLY a JSON array of the exact file paths that must be removed.
@@ -353,7 +353,7 @@ Return ONLY a JSON array of the exact file paths that must be removed.
   $body = @{
     model       = 'openai/gpt-5'
     temperature = 0
-    max_tokens  = 2000
+    max_tokens  = 8000
     messages    = @(
       @{ role = 'system'; content = $systemPrompt },
       @{ role = 'user'; content = $userPrompt }

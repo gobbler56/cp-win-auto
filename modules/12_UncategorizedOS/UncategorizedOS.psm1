@@ -15,14 +15,16 @@ $script:MaxReadmeCharacters     = 6000
 $script:MaxShareEntries         = 50
 $script:DefaultShareNames       = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:LastRemovedShares       = @()
-$script:WriteRightsMask         = [System.Security.AccessControl.FileSystemRights]::FullControl -bor \
-  [System.Security.AccessControl.FileSystemRights]::Modify -bor \
-  [System.Security.AccessControl.FileSystemRights]::Write -bor \
-  [System.Security.AccessControl.FileSystemRights]::WriteData -bor \
-  [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor \
-  [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor \
-  [System.Security.AccessControl.FileSystemRights]::AppendData -bor \
-  [System.Security.AccessControl.FileSystemRights]::ChangePermissions
+$script:WriteRightsMask         = (
+  [System.Security.AccessControl.FileSystemRights]::FullControl
+  -bor [System.Security.AccessControl.FileSystemRights]::Modify
+  -bor [System.Security.AccessControl.FileSystemRights]::Write
+  -bor [System.Security.AccessControl.FileSystemRights]::WriteData
+  -bor [System.Security.AccessControl.FileSystemRights]::CreateFiles
+  -bor [System.Security.AccessControl.FileSystemRights]::CreateDirectories
+  -bor [System.Security.AccessControl.FileSystemRights]::AppendData
+  -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions
+)
 
 foreach ($name in @('ADMIN$','IPC$','C$','D$','E$','F$','G$','H$','PRINT$','FAX$','SYSVOL','NETLOGON')) {
   [void]$script:DefaultShareNames.Add($name)
