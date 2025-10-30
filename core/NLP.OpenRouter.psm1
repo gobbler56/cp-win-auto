@@ -1,21 +1,52 @@
 Set-StrictMode -Version Latest
 
+$script:READMESYS_PROMPT = @'
+You are a STRICT extractor for CyberPatriot READMEs. 
+Return ONLY minified JSON, no prose, no markdown, no code fences. 
+If something is not present, return an empty array [] or empty object {} as appropriate.
+
+Contract (keys and types are REQUIRED):
+{
+  "all_users": [ { "name": "string", "account_type": "standard|admin", "groups": ["string", ...] }, ... ],
+  "recent_hires": [ { "name": "string", "account_type": "standard|admin", "groups": ["string", ...] }, ... ],
+  "terminated_users": ["string", ...],
+  "critical_services": ["string", ...]
+}
+
+Rules:
+- Use the README’s own lists as ground truth; do not hallucinate names.
+- Include every allowed/authorized person under "all_users" with their account_type (admin if they’re an administrator, otherwise standard). Include any groups if listed.
+- Put ONLY newly required accounts under "recent_hires".
+- Put ONLY explicitly unauthorized or removed users under "terminated_users".
+- If Guest should be disabled or Administrator disabled, DO NOT list them in all_users; engine handles built-ins.
+- If a task says “Create user account for user penguru”, emit:
+  "recent_hires":[{"name":"penguru","account_type":"standard","groups":[]}].
+- If a task says “Change unauthorized administrator jchutney to standard user”, ensure "all_users" contains jchutney as standard (not admin).
+- Do not include textual explanations. Output MUST be valid JSON, a single object, no trailing commas.
+
+Examples:
+INPUT (plain text snippet):
+"4. Remove unauthorized user darkarmy
+5. Remove unauthorized user fsociety
+6. Create user account for user penguru
+7. Change unauthorized administrator jchutney to standard user"
+
+VALID OUTPUT:
+{"all_users":[{"name":"jchutney","account_type":"standard","groups":[]}],"recent_hires":[{"name":"penguru","account_type":"standard","groups":[]}],"terminated_users":["darkarmy","fsociety"],"critical_services":[]}
+'@
+
 function Invoke-ReadmeExtraction {
   <#
-    Uses OpenRouter to extract structured directives from a CyberPatriot README (HTML).
+    Uses OpenRouter to extract structured directives from a CyberPatriot README.
     Requires: $env:OPENROUTER_API_KEY
     Model: $env:OPENROUTER_MODEL (default: openai/gpt-5-mini)
 
-    Returns a PSCustomObject matching the schema:
-    {
-      title: string,
-      all_users: [{name, account_type: admin|standard, groups: [..]}],
-      critical_services: [string]
-    }
+    Returns the raw JSON string provided by the model.
   #>
   param(
     [Parameter(Mandatory)][string]$RawHtml,
-    [string]$PlainText = ""
+    [string]$PlainText = "",
+    [string]$Url = ""
   )
 
   $apiKey = $env:OPENROUTER_API_KEY
@@ -23,122 +54,39 @@ function Invoke-ReadmeExtraction {
 
   $model = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5-mini' }
 
-  $system = @"
-You are a **deterministic information extraction engine** for CyberPatriot Windows images.
-Input is an HTML README page (sometimes ASPX). Output **must** be a single JSON object matching the EXACT schema below.
-You must **NOT** invent users, groups, or services. Only include items explicitly present in the text.
-When uncertain, leave arrays empty. Never output null/undefined and never add extra keys.
-
-Extraction rules:
-- **Title**: Prefer page <title> or the first visible heading naming the image (strip suffix like "README").
-- **Users**: Combine all accounts that should remain on the system (authorized lists, prose instructions like “create user ...”, screenshots text if present).
-  * Name is the local account token: strip annotations like "(you)", emails/domains, punctuation around quotes.
-  * `account_type`: "admin" if placed in Administrators or listed under "Authorized Administrators"; else "standard".
-  * `groups`: include any named local groups each user should belong to (e.g., "hypersonic") as they appear in text.
-- **Recent hires**: If the README explicitly states that a user is newly hired or must be created, include them in `recent_hires` **and** in `all_users` with their expected account type and groups.
-- **Terminated users**: If the README says a user should be removed/terminated, list the account token inside `terminated_users` and do **not** include it anywhere else.
-- **Groups**: If the README says “create group ... and add ...”, you still encode this only via each user's `groups` array.
-- **Critical services**: List service/product names explicitly mentioned as important to keep/configure (e.g., "IIS", "RDP", "SMB", "DNS", "MySQL", "Apache", "PHP", "FileZilla"). Don’t infer.
-- Ignore passwords provided in the README.
-- Ignore any domain/AD directives entirely (this is **local-only**).
-- Be strict: if something isn’t stated, don’t output it.
-
-Return ONLY JSON. No explanations.
-"@
-
-  # JSON Schema for OpenRouter structured outputs
-  $schema = @{
-    type = "object"
-    additionalProperties = $false
-    required = @("title","all_users","recent_hires","terminated_users","critical_services")
-    properties = @{
-      title = @{ type = "string" }
-      all_users = @{
-        type = "array"
-        items = @{
-          type = "object"
-          additionalProperties = $false
-          required = @("name","account_type","groups")
-          properties = @{
-            name = @{ type = "string" }
-            account_type = @{ type = "string"; enum = @("admin","standard") }
-            groups = @{
-              type = "array"
-              items = @{ type = "string" }
-            }
-          }
-        }
-      }
-      recent_hires = @{
-        type = "array"
-        items = @{
-          type = "object"
-          additionalProperties = $false
-          required = @("name","account_type","groups")
-          properties = @{
-            name = @{ type = "string" }
-            account_type = @{ type = "string"; enum = @("admin","standard") }
-            groups = @{
-              type = "array"
-              items = @{ type = "string" }
-            }
-          }
-        }
-      }
-      terminated_users = @{
-        type = "array"
-        items = @{ type = "string" }
-      }
-      critical_services = @{
-        type = "array"
-        items = @{ type = "string" }
-      }
-    }
+  $userContentBuilder = [System.Text.StringBuilder]::new()
+  if ($Url) {
+    [void]$userContentBuilder.Append("SOURCE: $Url`n`n")
+  }
+  if ($PlainText) {
+    [void]$userContentBuilder.Append($PlainText)
+  } elseif ($RawHtml) {
+    [void]$userContentBuilder.Append($RawHtml)
   }
 
   $messages = @(
-    @{ role = "system"; content = $system },
-    @{ role = "user"; content = @"
-<INPUT>
-[RAW_HTML_START]
-$RawHtml
-[RAW_HTML_END]
-
-[PLAIN_TEXT_START]
-$PlainText
-[PLAIN_TEXT_END]
-</INPUT>
-"@ }
+    @{ role = 'system'; content = $script:READMESYS_PROMPT },
+    @{ role = 'user';   content = $userContentBuilder.ToString() }
   )
 
   $body = @{
     model = $model
     temperature = 0
     top_p = 1
-    # Let the model use as many tokens as needed for high-variance HTML pages
-    # (models will cap at their own server-side max; no artificial cap here)
     messages = $messages
-    response_format = @{
-      type = "json_schema"
-      json_schema = @{
-        name = "structured_readme"
-        schema = $schema
-      }
-    }
-  } | ConvertTo-Json -Depth 20
+  } | ConvertTo-Json -Depth 10
 
   $headers = @{
-    "Authorization" = "Bearer $apiKey"
-    "Content-Type"  = "application/json"
-    "X-Title"       = "CP-Readme-Extraction"
+    'Authorization' = "Bearer $apiKey"
+    'Content-Type'  = 'application/json'
+    'X-Title'       = 'CP-Readme-Extraction'
   }
 
   try {
     $resp = Invoke-RestMethod -Method Post -Uri 'https://openrouter.ai/api/v1/chat/completions' -Headers $headers -Body $body -ErrorAction Stop
-    $txt  = $resp.choices[0].message.content
+    $txt  = [string]$resp.choices[0].message.content
     if (-not $txt) { throw "OpenRouter returned empty content" }
-    if ($txt -match '^\s*```') { $txt = ($txt -replace '^\s*```(?:json)?','' -replace '```\s*$','').Trim() }
-    return ($txt | ConvertFrom-Json)
+    return $txt.Trim()
   } catch {
     throw "OpenRouter extraction failed: $($_.Exception.Message)"
   }
