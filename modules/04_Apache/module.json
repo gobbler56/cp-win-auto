@@ -1,7 +1,7 @@
 {
-  "name": "DNS",
-  "category": "ApplicationSecurity",
-  "priority": 20,
+  "name": "Apache",
+  "category": "Apache",
+  "priority": 30,
   "appliesTo": {
     "os": [
       "win11",

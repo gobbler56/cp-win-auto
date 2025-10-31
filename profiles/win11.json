@@ -3,7 +3,7 @@
     "Dependencies",
     "UserAuditing",
     "LocalAccountPolicy",
-    "ApplicationSecurity",
+    "Apache",
     "Defensive",
     "ServiceAuditing",
     "OSUpdates",
@@ -14,15 +14,8 @@
     "UncategorizedOS"
   ],
   "moduleToggles": {
-    "ApplicationSecurity/Browsers": true,
-    "ApplicationSecurity/RDP": true,
-    "ApplicationSecurity/SMB": true,
-    "ApplicationSecurity/IIS": false,
-    "ApplicationSecurity/DNS": false,
-    "ApplicationSecurity/PHP": true,
-    "ApplicationSecurity/MySQL": true,
-    "ApplicationSecurity/FileZilla": true,
-    "SpoofOSUpdates": true
+    "SpoofOSUpdates": true,
+    "Apache": true
   },
   "args": {
     "MinPasswordLength": 12,
