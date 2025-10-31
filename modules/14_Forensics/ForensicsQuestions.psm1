@@ -787,6 +787,15 @@ function Invoke-ForensicsFileWorker {
   return $result
 }
 
+function Invoke-ForensicsFile {
+  param(
+    [Parameter(Mandatory)][System.IO.FileInfo]$File,
+    $Context
+  )
+
+  return (Invoke-ForensicsFileWorker -File $File -Context $Context)
+}
+
 function Invoke-Apply {
   param($Context)
 
@@ -807,7 +816,7 @@ function Invoke-Apply {
 
   if ($parallelLimit -le 1) {
     foreach ($file in $files) {
-      $results += Invoke-ForensicsFileWorker -File $file -Context $Context
+      $results += Invoke-ForensicsFile -File $file -Context $Context
     }
   } else {
     $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
@@ -815,7 +824,7 @@ function Invoke-Apply {
       $job = $files | ForEach-Object -Parallel {
         param($file,$context,$modulePath)
         if ($modulePath) { Import-Module -Force -DisableNameChecking $modulePath | Out-Null }
-        Invoke-ForensicsFileWorker -File $file -Context $context
+        Invoke-ForensicsFile -File $file -Context $context
       } -ArgumentList $Context,$modulePath -ThrottleLimit ([Math]::Max(1,$parallelLimit)) -AsJob
       if ($job) {
         $results = @(@(Receive-Job -Job $job -Wait -AutoRemoveJob))
@@ -828,7 +837,7 @@ function Invoke-Apply {
           Start-ThreadJob -ScriptBlock {
             param($file,$context,$modulePath)
             if ($modulePath) { Import-Module -Force -DisableNameChecking $modulePath | Out-Null }
-            Invoke-ForensicsFileWorker -File $file -Context $context
+            Invoke-ForensicsFile -File $file -Context $context
           } -ArgumentList $file,$Context,$modulePath
         }
         if ($jobs) {
@@ -837,7 +846,7 @@ function Invoke-Apply {
       } else {
         Write-Warn 'ThreadJob module not available; processing forensic questions sequentially.'
         foreach ($file in $files) {
-          $results += Invoke-ForensicsFileWorker -File $file -Context $Context
+          $results += Invoke-ForensicsFile -File $file -Context $Context
         }
       }
     }
@@ -882,4 +891,4 @@ function Invoke-Verify {
   return (New-ModuleResult -Name $script:ModuleName -Status 'Failed' -Message ("{0} forensic question file(s) still contain placeholders." -f $pending))
 }
 
-Export-ModuleMember -Function Test-Ready,Invoke-Apply,Invoke-Verify
+Export-ModuleMember -Function Test-Ready,Invoke-Apply,Invoke-Verify,Invoke-ForensicsFile
