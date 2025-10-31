@@ -48,6 +48,18 @@ function Is-LegacyGadgetOS {
   return (($os.Major -lt 6) -or ($os.Major -eq 6 -and $os.Minor -le 1))
 }
 
+function Ensure-HkuDrive {
+  if (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue) {
+    return
+  }
+
+  try {
+    New-PSDrive -Name 'HKU' -PSProvider Registry -Root 'HKEY_USERS' -ErrorAction Stop | Out-Null
+  } catch {
+    Write-Warn ("Failed to create HKU drive: {0}" -f $_.Exception.Message)
+  }
+}
+
 function Ensure-RegistryValue {
   param(
     [Parameter(Mandatory)][string]$Path,
@@ -56,6 +68,7 @@ function Ensure-RegistryValue {
     [Parameter(Mandatory)][object]$Value
   )
   try {
+    if ($Path -like 'HKU:*') { Ensure-HkuDrive }
     if (-not (Test-Path $Path)) {
       New-Item -Path $Path -Force | Out-Null
     }
@@ -74,7 +87,10 @@ function Ensure-RegistryValue {
 
 function Get-RegistryValueSafe {
   param([string]$Path,[string]$Name)
-  try { return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name }
+  try {
+    if ($Path -like 'HKU:*') { Ensure-HkuDrive }
+    return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name
+  }
   catch { return $null }
 }
 
@@ -173,6 +189,7 @@ function Ensure-ScreenSaverPolicy {
 
   $userPaths = @('HKCU:\Control Panel\Desktop','HKU:\.DEFAULT\Control Panel\Desktop')
   try {
+    Ensure-HkuDrive
     foreach ($sidKey in Get-ChildItem -Path 'HKU:' -ErrorAction SilentlyContinue) {
       if ($sidKey.Name -match 'S-1-5-21-') {
         $userPaths += (Join-Path $sidKey.PSPath 'Control Panel\Desktop')
@@ -264,18 +281,8 @@ function Test-EarlyLaunchPolicy {
 }
 
 function Ensure-ValidateHeapIntegrity {
-  $changed = $false
-  if (Get-Command Set-ProcessMitigation -ErrorAction SilentlyContinue) {
-    try {
-      Set-ProcessMitigation -System -Enable ValidateHeapIntegrity -ErrorAction Stop | Out-Null
-      $changed = $true
-    } catch {
-      Write-Warn ("Set-ProcessMitigation ValidateHeapIntegrity failed: {0}" -f $_.Exception.Message)
-    }
-  }
   $kernelPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel'
-  $changed = (Ensure-RegistryValue -Path $kernelPath -Name 'ValidateHeapIntegrity' -Type 'DWord' -Value 1) -or $changed
-  return $changed
+  return (Ensure-RegistryValue -Path $kernelPath -Name 'ValidateHeapIntegrity' -Type 'DWord' -Value 1)
 }
 
 function Test-ValidateHeapIntegrity {
@@ -575,7 +582,7 @@ function Remove-NonDefaultSharesWithAi {
     }
   }
 
-  return $removed
+  return @($removed)
 }
 
 function Ensure-ShareRestrictions {
