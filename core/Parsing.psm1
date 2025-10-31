@@ -83,6 +83,44 @@ function Normalize-ReadmeDoc {
         if ($v -isnot [System.Collections.IEnumerable] -or $v -is [string]) { $Doc.$k = @($v) }
     }
 
+    foreach ($k in 'new_hires','users_to_create') {
+        if (-not ($Doc.PSObject.Properties.Name -contains $k)) { continue }
+        $v = $Doc.$k
+        if ($null -eq $v) { $Doc.$k = @(); continue }
+        if ($v -isnot [System.Collections.IEnumerable] -or $v -is [string]) { $Doc.$k = @($v) }
+    }
+
+    $convertToRecentHire = {
+        param($Items)
+        $result = @()
+        foreach ($item in @($Items)) {
+            if (-not $item) { continue }
+            if ($item -is [string]) {
+                $nm = ($item -as [string]).Trim()
+                if (-not $nm) { continue }
+                $result += [pscustomobject]@{ name = $nm; account_type = 'standard'; groups = @() }
+            }
+            else {
+                $result += $item
+            }
+        }
+        return $result
+    }
+
+    if ($Doc.PSObject.Properties.Name -contains 'new_hires') {
+        $Doc.recent_hires = @($Doc.recent_hires + (& $convertToRecentHire $Doc.new_hires))
+    }
+
+    if ($Doc.PSObject.Properties.Name -contains 'users_to_create') {
+        $Doc.recent_hires = @($Doc.recent_hires + (& $convertToRecentHire $Doc.users_to_create))
+    }
+
+    if ($Doc.PSObject.Properties.Name -contains 'Directives' -and $Doc.Directives) {
+        if ($Doc.Directives.PSObject.Properties.Name -contains 'UsersToCreate') {
+            $Doc.recent_hires = @($Doc.recent_hires + (& $convertToRecentHire $Doc.Directives.UsersToCreate))
+        }
+    }
+
     foreach ($colName in 'all_users','recent_hires') {
         $sanitized = @()
         foreach ($u in @($Doc.$colName)) {
@@ -145,6 +183,8 @@ function Get-ReadmeInfo {
     }
 
     $rawModel = Invoke-ReadmeExtraction -RawHtml $rawHtml -PlainText $plainText -Url $fetch.Url
+    Write-Info "[Readme] AI raw response follows:"
+    Write-Host $rawModel
     $doc      = ConvertFrom-ModelJsonStrict -Text $rawModel
     $doc      = Normalize-ReadmeDoc -Doc $doc
 
