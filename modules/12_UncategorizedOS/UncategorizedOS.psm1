@@ -49,10 +49,7 @@ function Is-LegacyGadgetOS {
 }
 
 function Ensure-HkuDrive {
-  if (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue) {
-    return
-  }
-
+  if (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue) { return }
   try {
     New-PSDrive -Name 'HKU' -PSProvider Registry -Root 'HKEY_USERS' -ErrorAction Stop | Out-Null
   } catch {
@@ -67,16 +64,22 @@ function Ensure-RegistryValue {
     [Parameter(Mandatory)][ValidateSet('String','ExpandString','MultiString','Binary','DWord','QWord')][string]$Type,
     [Parameter(Mandatory)][object]$Value
   )
+
   try {
-    if ($Path -like 'HKU:*') { Ensure-HkuDrive }
-    if (-not (Test-Path $Path)) {
+    if ($Path -like 'HKU:*') {
+      Ensure-HkuDrive
+      if (-not (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue)) {
+        throw "HKU PSDrive unavailable"
+      }
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
       New-Item -Path $Path -Force | Out-Null
     }
-    # Normalize numeric types
+
     if ($Type -eq 'DWord') { $Value = [int]$Value }
     elseif ($Type -eq 'QWord') { $Value = [long]$Value }
 
-    # Use New-ItemProperty -Force universally (creates or updates) to avoid "property not found"
     New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
     return $true
   } catch {
@@ -86,12 +89,20 @@ function Ensure-RegistryValue {
 }
 
 function Get-RegistryValueSafe {
-  param([string]$Path,[string]$Name)
+  param([string]$Path, [string]$Name)
+
   try {
-    if ($Path -like 'HKU:*') { Ensure-HkuDrive }
+    if ($Path -like 'HKU:*') {
+      Ensure-HkuDrive
+      if (-not (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue)) {
+        return $null
+      }
+    }
+
     return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name
+  } catch {
+    return $null
   }
-  catch { return $null }
 }
 
 # ---- Settings: RDP / Remote Assistance --------------------------------------
@@ -421,20 +432,23 @@ function Get-ReadMeContent {
 
 function Get-ShareInventory {
   $shares = @()
+
   if (Get-Command Get-SmbShare -ErrorAction SilentlyContinue) {
     try {
-      $shares = Get-SmbShare -ErrorAction Stop | Select-Object Name, Path, Description
+      $shares = @(Get-SmbShare -ErrorAction Stop | Select-Object Name, Path, Description)
     } catch {}
   }
+
   if (-not $shares -or $shares.Count -eq 0) {
     try {
       $output = & net share 2>$null
       if ($LASTEXITCODE -eq 0 -and $output) {
         foreach ($line in $output) {
-          if ($line -match '^\s*$') { continue }
-          if ($line -match '^Share name') { continue }
-          if ($line -match '^---') { continue }
-          if ($line -match '^The command completed successfully') { break }
+          if ($line -match '^\s*$' -or
+              $line -match '^Share name' -or
+              $line -match '^---' -or
+              $line -match '^The command completed successfully') { continue }
+
           $parts = $line -split '\s{2,}'
           if ($parts.Count -ge 2) {
             $name = $parts[0].Trim()
@@ -448,7 +462,8 @@ function Get-ShareInventory {
       }
     } catch {}
   }
-  return @($shares)
+
+  return @($shares | Select-Object -First $script:MaxShareEntries)
 }
 
 function Build-ShareAiRequest {
