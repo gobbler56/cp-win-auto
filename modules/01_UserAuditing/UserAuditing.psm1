@@ -8,6 +8,19 @@ Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot '../../core/U
 
 function Test-Ready { param($Context) return $true }
 
+# --------------------------------------------------------------------------------------
+# Targeted provisioning debug (off by default). Enable with: $env:CP_DEBUG_PROVISION = '1'
+# --------------------------------------------------------------------------------------
+function Write-ProvisionDebug {
+  param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Message)
+  if ($env:CP_DEBUG_PROVISION -eq '1') {
+    Write-Host ("[ProvisionDebug] " + ($Message -join ' '))
+  }
+}
+
+# --------------------------------------------------------------------------------------
+# Align-PrivilegedGroupMembership: keep privileged groups aligned to the allow-list
+# --------------------------------------------------------------------------------------
 function Align-PrivilegedGroupMembership {
   param(
     [string]$GroupName,
@@ -45,6 +58,101 @@ function Align-PrivilegedGroupMembership {
   }
 }
 
+# --------------------------------------------------------------------------------------
+# Provision-LocalUser: robust creation with verify-after-ensure and direct fallback
+# --------------------------------------------------------------------------------------
+function Provision-LocalUser {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$Name
+  )
+
+  Write-ProvisionDebug "Start Name='$Name'"
+
+  $existing = $null
+  try { $existing = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
+  Write-ProvisionDebug "ExistsBefore=$([bool]$existing)"
+
+  if ($existing) { return $true }
+
+  # 1) Try helper; do not trust return value
+  try {
+    Ensure-LocalUserExists -Name $Name -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
+  } catch {
+    Write-Warn "Ensure-LocalUserExists threw for '$Name': $($_.Exception.Message)"
+    Write-ProvisionDebug "Ensure.Exception=$($_.Exception.GetType().FullName)"
+    if ($_.Exception.InnerException) { Write-ProvisionDebug "Ensure.Inner=$($_.Exception.InnerException.Message)" }
+  }
+
+  $userNow = $null
+  try { $userNow = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
+  if ($userNow) {
+    Write-Ok "Created local user $Name"
+    Write-ProvisionDebug ("CreatedVia=Ensure User='" + $userNow.Name + "'")
+    return $true
+  }
+
+  # 2) Fallback: direct New-LocalUser to surface real Windows errors
+  Write-Warn "Ensure-LocalUserExists did not create '$Name' — attempting direct New-LocalUser"
+  try {
+    $tmpPw = New-RandomPassword
+    $secPw = To-SecureString $tmpPw
+    New-LocalUser -Name $Name -Password $secPw -AccountNeverExpires:$true -ErrorAction Stop | Out-Null
+    Write-Ok "Created local user $Name via New-LocalUser"
+  } catch {
+    Write-Err "Create user '$Name' failed: $($_.Exception.Message)"
+    Write-ProvisionDebug "New-LocalUser.Exception=$($_.Exception.GetType().FullName)"
+    if ($_.Exception.InnerException) { Write-ProvisionDebug "New-LocalUser.Inner=$($_.Exception.InnerException.Message)" }
+    try {
+      Write-ProvisionDebug "net accounts =>"
+      (& cmd /c 'net accounts') | ForEach-Object { Write-ProvisionDebug $_ }
+    } catch {}
+    return $false
+  }
+
+  # Verify after fallback
+  try { $userNow = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
+  if ($userNow) {
+    Write-ProvisionDebug ("CreatedVia=New-LocalUser User='" + $userNow.Name + "'")
+    return $true
+  }
+
+  Write-Err "User '$Name' still not present after both attempts."
+  return $false
+}
+
+# --------------------------------------------------------------------------------------
+# Helpers to parse directives into canonical objects
+# --------------------------------------------------------------------------------------
+function ConvertTo-RecentHireObjects {
+  param($UsersToCreate)
+  $out = @()
+  foreach ($entry in @($UsersToCreate)) {
+    if (-not $entry) { continue }
+    $name = if ($entry.PSObject.Properties.Name -contains 'Name') { $entry.Name } elseif ($entry.PSObject.Properties.Name -contains 'name') { $entry.name } else { $null }
+    if ($name) { $name = ($name -as [string]).Trim() }
+    if (-not $name) { continue }
+
+    $accountType = if ($entry.PSObject.Properties.Name -contains 'AccountType' -and $entry.AccountType) { $entry.AccountType }
+      elseif ($entry.PSObject.Properties.Name -contains 'account_type' -and $entry.account_type) { $entry.account_type }
+      else { 'standard' }
+    if ($accountType) { $accountType = ($accountType -as [string]).ToLowerInvariant() }
+    if ($accountType -ne 'admin') { $accountType = 'standard' }
+
+    $groups = @()
+    if ($entry.PSObject.Properties.Name -contains 'Groups' -and $entry.Groups) {
+      foreach ($g in @($entry.Groups)) { $grpName = ($g -as [string]).Trim(); if ($grpName) { $groups += $grpName } }
+      $groups = @($groups | Select-Object -Unique)
+    }
+
+    $out += [pscustomobject]@{ Name = $name; AccountType = $accountType; Groups = $groups }
+  }
+  return $out
+}
+
+# --------------------------------------------------------------------------------------
+# Main Apply
+# --------------------------------------------------------------------------------------
 function Invoke-Apply {
   param($Context)
 
@@ -56,58 +164,24 @@ function Invoke-Apply {
   $rx = $Context.Readme.Directives
   $authUsersFromReadme  = @($Context.Readme.AuthorizedUsers)
   $authAdminsFromReadme = @($Context.Readme.AuthorizedAdmins)
-  $recentHires = @()
+
+  # ---- Build canonical hires/terminations ----
+  $recentHires   = @()
   $terminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
-  if ($rx -and $rx.PSObject.Properties.Name -contains 'UsersToCreate' -and $rx.UsersToCreate) {
-    foreach ($entry in @($rx.UsersToCreate)) {
-      if (-not $entry) { continue }
-      $name = if ($entry.PSObject.Properties.Name -contains 'Name') { $entry.Name } elseif ($entry.PSObject.Properties.Name -contains 'name') { $entry.name } else { $null }
-      if ($name) { $name = ($name -as [string]).Trim() }
-      if (-not $name) { continue }
-
-      $accountType = if ($entry.PSObject.Properties.Name -contains 'AccountType' -and $entry.AccountType) { $entry.AccountType }
-        elseif ($entry.PSObject.Properties.Name -contains 'account_type' -and $entry.account_type) { $entry.account_type }
-        else { 'standard' }
-      if ($accountType) { $accountType = ($accountType -as [string]).ToLowerInvariant() }
-      if ($accountType -ne 'admin') { $accountType = 'standard' }
-
-      $groups = @()
-      if ($entry.PSObject.Properties.Name -contains 'Groups' -and $entry.Groups) {
-        foreach ($g in @($entry.Groups)) {
-          $grpName = ($g -as [string]).Trim()
-          if ($grpName) { $groups += $grpName }
-        }
-        $groups = @($groups | Select-Object -Unique)
-      }
-
-      $recentHires += [pscustomobject]@{
-        Name        = $name
-        AccountType = $accountType
-        Groups      = $groups
-      }
-    }
-  }
-
-  foreach ($hire in $recentHires) {
-    $existingUser = $null
-    try { $existingUser = Get-LocalUser -Name $hire.Name -ErrorAction SilentlyContinue } catch {}
-    $ensuredUser = Ensure-LocalUserExists -Name $hire.Name -CreateIfMissing -Password (To-SecureString (New-RandomPassword))
-    if ($ensuredUser) {
-      if (-not $existingUser) { Write-Ok "Created local user $($hire.Name)" }
-    } else {
-      Write-Warn "Failed to provision local user $($hire.Name)"
-    }
-  }
   $terminatedUsers = @()
+
+  if ($rx -and $rx.PSObject.Properties.Name -contains 'UsersToCreate' -and $rx.UsersToCreate) {
+    $recentHires = ConvertTo-RecentHireObjects -UsersToCreate $rx.UsersToCreate
+  }
+
   if ($rx -and $rx.PSObject.Properties.Name -contains 'TerminatedUsers' -and $rx.TerminatedUsers) {
     foreach ($term in @($rx.TerminatedUsers)) {
-      $name = ($term -as [string]).Trim()
-      if (-not $name) { continue }
+      $name = ($term -as [string]).Trim(); if (-not $name) { continue }
       if ($terminatedSet.Add($name)) { $terminatedUsers += $name }
     }
   }
 
-  # -------- Phase 1: Allow-lists from README (authoritative) --------
+  # ---- Phase 1: compute allow-lists (authoritative) ----
   $authorizedUsers  = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
   foreach ($x in @($authUsersFromReadme + $authAdminsFromReadme)) { if ($x) { [void]$authorizedUsers.Add($x) } }
 
@@ -115,21 +189,19 @@ function Invoke-Apply {
   foreach ($x in @($authAdminsFromReadme)) { if ($x) { [void]$authorizedAdmins.Add($x); [void]$authorizedUsers.Add($x) } }
 
   foreach ($hire in $recentHires) {
-    if (-not $hire.Name) { continue }
-    [void]$authorizedUsers.Add($hire.Name)
-    if ($hire.AccountType -eq 'admin') { [void]$authorizedAdmins.Add($hire.Name) }
+    if ($hire.Name) { [void]$authorizedUsers.Add($hire.Name) }
+    if ($hire.AccountType -eq 'admin' -and $hire.Name) { [void]$authorizedAdmins.Add($hire.Name) }
   }
 
-  foreach ($term in $terminatedUsers) {
-    [void]$authorizedUsers.Remove($term)
-    [void]$authorizedAdmins.Remove($term)
-  }
+  foreach ($term in $terminatedUsers) { [void]$authorizedUsers.Remove($term); [void]$authorizedAdmins.Remove($term) }
 
-  foreach ($u in $authorizedUsers) {
-    Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
-  }
+  # ---- Phase 1b: proactively ensure all allow-listed users exist ----
+  foreach ($u in $authorizedUsers) { Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null }
 
-  # -------- Phase 2: Remove unauthorized users (diff only if we have allow-list) --------
+  # ---- Phase 1c: explicit provisioning pass for recent hires with debug & fallback ----
+  foreach ($hire in $recentHires) { if ($hire.Name) { [void](Provision-LocalUser -Name $hire.Name) } }
+
+  # ---- Phase 2: Remove unauthorized users (diff only if we have allow-list) ----
   $currentUsers = Get-LocalUserNames -ExcludeDefaults
   $unauthorized = @()
   if ($authorizedUsers.Count -gt 0 -or $authorizedAdmins.Count -gt 0) {
@@ -143,30 +215,34 @@ function Invoke-Apply {
     Write-Ok "Removed unauthorized user $u"
   }
 
-  # re-enumerate
+  # Refresh user list after deletions
   $currentUsers = Get-LocalUserNames
 
-  # -------- Phase 3b: Explicit terminations --------
-  foreach ($term in $terminatedUsers) {
-    if ($defaults -contains $term) { continue }
-    $user = Get-LocalUser -Name $term -ErrorAction SilentlyContinue
-    if (-not $user) { continue }
-    try { Get-LocalGroup | ForEach-Object { Remove-UserFromLocalGroupSafe -Group $_.Name -User $term } } catch {}
-    Remove-LocalUserSafe -Name $term
-    Write-Ok "Removed terminated user $term"
+  # ---- Phase 3: Groups from README + hire groups ----
+  # Merge hire.Groups into the model's GroupMembersToAdd
+  $groupMembers = @{}
+  if ($rx -and $rx.PSObject.Properties.Name -contains 'GroupMembersToAdd' -and $rx.GroupMembersToAdd) {
+    foreach ($k in $rx.GroupMembersToAdd.Keys) { $groupMembers[$k] = @($rx.GroupMembersToAdd[$k]) }
   }
+  foreach ($hire in $recentHires) {
+    foreach ($g in @($hire.Groups)) {
+      if (-not $groupMembers.ContainsKey($g)) { $groupMembers[$g] = @() }
+      $groupMembers[$g] += $hire.Name
+    }
+  }
+  # Create any referenced groups
+  $groupsToCreate = @()
+  if ($rx -and $rx.PSObject.Properties.Name -contains 'GroupsToCreate' -and $rx.GroupsToCreate) { $groupsToCreate += $rx.GroupsToCreate }
+  $groupsToCreate += $groupMembers.Keys
+  $groupsToCreate = $groupsToCreate | Select-Object -Unique
 
-  # Refresh after deletions
-  $currentUsers = Get-LocalUserNames
-
-  # -------- Phase 3: Groups from README model output --------
-  foreach ($g in ($rx.GroupsToCreate | Select-Object -Unique)) {
+  foreach ($g in $groupsToCreate) {
     if (-not (Get-LocalGroup -Name $g -ErrorAction SilentlyContinue)) {
       try { New-LocalGroup -Name $g -ErrorAction Stop | Out-Null; Write-Ok "Created group $g" } catch { Write-Err "Create group $g failed: $_" }
     }
   }
-  foreach ($grp in $rx.GroupMembersToAdd.Keys) {
-    $members = $rx.GroupMembersToAdd[$grp] | Select-Object -Unique
+  foreach ($grp in $groupMembers.Keys) {
+    $members = @($groupMembers[$grp] | Where-Object { $_ } | Select-Object -Unique)
     foreach ($u in $members) {
       Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
       Add-UserToLocalGroupSafe -Group $grp -User $u
@@ -174,7 +250,7 @@ function Invoke-Apply {
     }
   }
 
-  # -------- Phase 4: Privileged group alignment --------
+  # ---- Phase 4: Privileged group alignment ----
   $privilegedGroups = @(
     'Administrators',
     'DnsAdmins',
@@ -192,7 +268,7 @@ function Invoke-Apply {
     Align-PrivilegedGroupMembership -GroupName $grpName -AuthorizedAdmins $authorizedAdmins -BuiltInAdmin $builtInAdmin -ForceRemovalWhenEmpty:$force
   }
 
-  # -------- Phase 5: Global per-user hardening --------
+  # ---- Phase 5: Global per-user hardening ----
   $nonDefaults = Get-LocalUserNames -ExcludeDefaults
   foreach ($u in $nonDefaults) {
     try {
@@ -210,7 +286,7 @@ function Invoke-Apply {
     }
   }
 
-  # -------- Phase 6: Built-ins --------
+  # ---- Phase 6: Built-ins ----
   Disable-LocalUserSafe -Name 'Guest'
   Disable-LocalUserSafe -Name $builtInAdmin
 
