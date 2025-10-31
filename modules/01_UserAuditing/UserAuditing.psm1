@@ -61,12 +61,38 @@ function Invoke-Apply {
   if ($rx -and $rx.PSObject.Properties.Name -contains 'UsersToCreate' -and $rx.UsersToCreate) {
     foreach ($entry in @($rx.UsersToCreate)) {
       if (-not $entry) { continue }
-      $name = $entry.Name
+      $name = if ($entry.PSObject.Properties.Name -contains 'Name') { $entry.Name } elseif ($entry.PSObject.Properties.Name -contains 'name') { $entry.name } else { $null }
       if (-not $name) { continue }
+
+      $accountType = if ($entry.PSObject.Properties.Name -contains 'AccountType' -and $entry.AccountType) { $entry.AccountType }
+        elseif ($entry.PSObject.Properties.Name -contains 'account_type' -and $entry.account_type) { $entry.account_type }
+        else { 'standard' }
+      if ($accountType) { $accountType = ($accountType -as [string]).ToLowerInvariant() }
+      if ($accountType -ne 'admin') { $accountType = 'standard' }
+
+      $groups = @()
+      if ($entry.PSObject.Properties.Name -contains 'Groups' -and $entry.Groups) {
+        foreach ($g in @($entry.Groups)) {
+          $grpName = ($g -as [string]).Trim()
+          if ($grpName) { $groups += $grpName }
+        }
+        $groups = @($groups | Select-Object -Unique)
+      }
+
+      $existingUser = $null
+      try { $existingUser = Get-LocalUser -Name $name -ErrorAction SilentlyContinue } catch {}
+      $ensuredUser = Ensure-LocalUserExists -Name $name -CreateIfMissing -Password (To-SecureString (New-RandomPassword))
+      if ($ensuredUser) {
+        if (-not $existingUser) { Write-Ok "Created local user $name" }
+      } else {
+        Write-Warn "Failed to provision local user $name"
+        continue
+      }
+
       $recentHires += [pscustomobject]@{
         Name        = $name
-        AccountType = $entry.AccountType
-        Groups      = @($entry.Groups)
+        AccountType = $accountType
+        Groups      = $groups
       }
     }
   }
