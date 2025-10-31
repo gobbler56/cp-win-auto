@@ -9,12 +9,61 @@ Import-Module -Force -DisableNameChecking (Join-Path $PSScriptRoot '../../core/U
 function Test-Ready { param($Context) return $true }
 
 # --------------------------------------------------------------------------------------
+# Strong password generator that satisfies Windows complexity
+# --------------------------------------------------------------------------------------
+function New-ComplexPassword {
+  [CmdletBinding()]
+  param(
+    [int]$Length = 20,
+    [string[]]$ExcludeTokens = @()
+  )
+  $upper   = 'ABCDEFGHJKLMNPQRSTUVWXYZ'   # avoid I/O
+  $lower   = 'abcdefghijkmnopqrstuvwxyz'  # avoid l
+  $digits  = '23456789'                   # avoid 0/1
+  $symbols = '!@#$%^&*()-_=+[]{}:;,.?'
+
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  function Pick([string]$chars) {
+    $b = New-Object byte[] 4
+    $rng.GetBytes($b)
+    $i = ([BitConverter]::ToUInt32($b,0)) % $chars.Length
+    return $chars[$i]
+  }
+
+  # ensure at least one from each category
+  $pw = [System.Collections.Generic.List[char]]::new()
+  $pw.Add((Pick $upper))   | Out-Null
+  $pw.Add((Pick $lower))   | Out-Null
+  $pw.Add((Pick $digits))  | Out-Null
+  $pw.Add((Pick $symbols)) | Out-Null
+
+  $all = $upper + $lower + $digits + $symbols
+  while ($pw.Count -lt $Length) { $pw.Add((Pick $all)) | Out-Null }
+
+  # shuffle
+  $shuffled = $pw | Sort-Object { Get-Random }
+  $candidate = -join $shuffled
+
+  foreach ($t in $ExcludeTokens) {
+    if ([string]::IsNullOrWhiteSpace($t)) { continue }
+    if ($candidate.ToLower().Contains($t.ToLower())) {
+      return New-ComplexPassword -Length $Length -ExcludeTokens $ExcludeTokens
+    }
+  }
+  return $candidate
+}
+function To-ComplexSecureString([string]$user) {
+  $pw = New-ComplexPassword -ExcludeTokens @($user)
+  return (To-SecureString $pw)   # pass as positional arg, not via pipeline
+}
+
+# --------------------------------------------------------------------------------------
 # Targeted provisioning debug (off by default). Enable with: $env:CP_DEBUG_PROVISION = '1'
 # --------------------------------------------------------------------------------------
 function Write-ProvisionDebug {
   param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Message)
   if ($env:CP_DEBUG_PROVISION -eq '1') {
-    Write-Host ("[ProvisionDebug] " + ($Message -join ' '))
+    Write-Host ('[ProvisionDebug] ' + ($Message -join ' '))
   }
 }
 
@@ -44,16 +93,16 @@ function Align-PrivilegedGroupMembership {
     $shouldRemove = $ForceRemovalWhenEmpty -or $AuthorizedAdmins.Count -gt 0
     if ($shouldRemove -and -not $AuthorizedAdmins.Contains($name)) {
       Remove-UserFromLocalGroupSafe -Group $GroupName -User $name
-      Write-Ok "Removed $name from $GroupName"
+      Write-Ok ('Removed {0} from {1}' -f $name, $GroupName)
     }
   }
 
   foreach ($admin in $AuthorizedAdmins) {
     if (-not $admin) { continue }
-    Ensure-LocalUserExists -Name $admin -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
+    Ensure-LocalUserExists -Name $admin -CreateIfMissing -Password (To-ComplexSecureString $admin) | Out-Null
     if (-not (Test-LocalGroupMember -Group $GroupName -User $admin)) {
       Add-UserToLocalGroupSafe -Group $GroupName -User $admin
-      Write-Ok "Ensured $admin is in $GroupName"
+      Write-Ok ('Ensured {0} is in {1}' -f $admin, $GroupName)
     }
   }
 }
@@ -67,44 +116,44 @@ function Provision-LocalUser {
     [Parameter(Mandatory)][string]$Name
   )
 
-  Write-ProvisionDebug "Start Name='$Name'"
+  Write-ProvisionDebug ('Start Name='' {0} ''' -f $Name)
 
   $existing = $null
   try { $existing = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
-  Write-ProvisionDebug "ExistsBefore=$([bool]$existing)"
+  Write-ProvisionDebug ('ExistsBefore={0}' -f ([bool]$existing))
 
   if ($existing) { return $true }
 
   # 1) Try helper; do not trust return value
   try {
-    Ensure-LocalUserExists -Name $Name -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
+    Ensure-LocalUserExists -Name $Name -CreateIfMissing -Password (To-ComplexSecureString $Name) | Out-Null
   } catch {
-    Write-Warn "Ensure-LocalUserExists threw for '$Name': $($_.Exception.Message)"
-    Write-ProvisionDebug "Ensure.Exception=$($_.Exception.GetType().FullName)"
-    if ($_.Exception.InnerException) { Write-ProvisionDebug "Ensure.Inner=$($_.Exception.InnerException.Message)" }
+    Write-Warn ('Ensure-LocalUserExists threw for ''{0}'': {1}' -f $Name, $_.Exception.Message)
+    Write-ProvisionDebug ('Ensure.Exception={0}' -f ($_.Exception.GetType().FullName))
+    if ($_.Exception.InnerException) { Write-ProvisionDebug ('Ensure.Inner={0}' -f $_.Exception.InnerException.Message) }
   }
 
   $userNow = $null
   try { $userNow = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
   if ($userNow) {
-    Write-Ok "Created local user $Name"
-    Write-ProvisionDebug ("CreatedVia=Ensure User='" + $userNow.Name + "'")
+    Write-Ok ('Created local user {0}' -f $Name)
+    Write-ProvisionDebug ('CreatedVia=Ensure User=''{0}''' -f $userNow.Name)
     return $true
   }
 
   # 2) Fallback: direct New-LocalUser to surface real Windows errors
-  Write-Warn "Ensure-LocalUserExists did not create '$Name' — attempting direct New-LocalUser"
+  Write-Warn ('Ensure-LocalUserExists did not create ''{0}'' — attempting direct New-LocalUser' -f $Name)
   try {
-    $tmpPw = New-RandomPassword
+    $tmpPw = New-ComplexPassword -ExcludeTokens @($Name)
     $secPw = To-SecureString $tmpPw
     New-LocalUser -Name $Name -Password $secPw -AccountNeverExpires:$true -ErrorAction Stop | Out-Null
-    Write-Ok "Created local user $Name via New-LocalUser"
+    Write-Ok ('Created local user {0} via New-LocalUser' -f $Name)
   } catch {
-    Write-Err "Create user '$Name' failed: $($_.Exception.Message)"
-    Write-ProvisionDebug "New-LocalUser.Exception=$($_.Exception.GetType().FullName)"
-    if ($_.Exception.InnerException) { Write-ProvisionDebug "New-LocalUser.Inner=$($_.Exception.InnerException.Message)" }
+    Write-Err ('Create user ''{0}'' failed: {1}' -f $Name, $_.Exception.Message)
+    Write-ProvisionDebug ('New-LocalUser.Exception={0}' -f ($_.Exception.GetType().FullName))
+    if ($_.Exception.InnerException) { Write-ProvisionDebug ('New-LocalUser.Inner={0}' -f $_.Exception.InnerException.Message) }
     try {
-      Write-ProvisionDebug "net accounts =>"
+      Write-ProvisionDebug 'net accounts =>'
       (& cmd /c 'net accounts') | ForEach-Object { Write-ProvisionDebug $_ }
     } catch {}
     return $false
@@ -113,11 +162,11 @@ function Provision-LocalUser {
   # Verify after fallback
   try { $userNow = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue } catch {}
   if ($userNow) {
-    Write-ProvisionDebug ("CreatedVia=New-LocalUser User='" + $userNow.Name + "'")
+    Write-ProvisionDebug ('CreatedVia=New-LocalUser User=''{0}''' -f $userNow.Name)
     return $true
   }
 
-  Write-Err "User '$Name' still not present after both attempts."
+  Write-Err ('User ''{0}'' still not present after both attempts.' -f $Name)
   return $false
 }
 
@@ -196,7 +245,7 @@ function Invoke-Apply {
   foreach ($term in $terminatedUsers) { [void]$authorizedUsers.Remove($term); [void]$authorizedAdmins.Remove($term) }
 
   # ---- Phase 1b: proactively ensure all allow-listed users exist ----
-  foreach ($u in $authorizedUsers) { Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null }
+  foreach ($u in $authorizedUsers) { Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-ComplexSecureString $u) | Out-Null }
 
   # ---- Phase 1c: explicit provisioning pass for recent hires with debug & fallback ----
   foreach ($hire in $recentHires) { if ($hire.Name) { [void](Provision-LocalUser -Name $hire.Name) } }
@@ -212,7 +261,7 @@ function Invoke-Apply {
     if ($defaults -contains $u) { continue }
     try { Get-LocalGroup | ForEach-Object { Remove-UserFromLocalGroupSafe -Group $_.Name -User $u } } catch {}
     Remove-LocalUserSafe -Name $u
-    Write-Ok "Removed unauthorized user $u"
+    Write-Ok ('Removed unauthorized user {0}' -f $u)
   }
 
   # Refresh user list after deletions
@@ -238,15 +287,15 @@ function Invoke-Apply {
 
   foreach ($g in $groupsToCreate) {
     if (-not (Get-LocalGroup -Name $g -ErrorAction SilentlyContinue)) {
-      try { New-LocalGroup -Name $g -ErrorAction Stop | Out-Null; Write-Ok "Created group $g" } catch { Write-Err "Create group $g failed: $_" }
+      try { New-LocalGroup -Name $g -ErrorAction Stop | Out-Null; Write-Ok ('Created group {0}' -f $g) } catch { Write-Err ('Create group {0} failed: {1}' -f $g, $_) }
     }
   }
   foreach ($grp in $groupMembers.Keys) {
     $members = @($groupMembers[$grp] | Where-Object { $_ } | Select-Object -Unique)
     foreach ($u in $members) {
-      Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-SecureString (New-RandomPassword)) | Out-Null
+      Ensure-LocalUserExists -Name $u -CreateIfMissing -Password (To-ComplexSecureString $u) | Out-Null
       Add-UserToLocalGroupSafe -Group $grp -User $u
-      Write-Ok "Ensured $u in $grp"
+      Write-Ok ('Ensured {0} in {1}' -f $u, $grp)
     }
   }
 
@@ -273,16 +322,16 @@ function Invoke-Apply {
   foreach ($u in $nonDefaults) {
     try {
       if ($autoUser -and $u -ieq $autoUser) {
-        Write-Warn "Skipping password rotation for auto-login account '$u'"
+        Write-Warn ('Skipping password rotation for auto-login account ''{0}''' -f $u)
       } else {
-        Set-LocalUserPassword -Name $u -Password (To-SecureString (New-RandomPassword))
+        Set-LocalUserPassword -Name $u -Password (To-ComplexSecureString $u)
       }
       Enable-LocalUserSafe -Name $u
       [void](Set-LocalPasswordExpires -Name $u -Expires:$true)
       [void](Set-LocalUserCanChangePassword -Name $u -CanChange:$true)
-      Write-Ok "Hardened user $u"
+      Write-Ok ('Hardened user {0}' -f $u)
     } catch {
-      Write-Warn "Failed to harden ${u}: $($_.Exception.Message)"
+      Write-Warn ('Failed to harden {0}: {1}' -f $u, $_.Exception.Message)
     }
   }
 
