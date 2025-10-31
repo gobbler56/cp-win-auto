@@ -202,6 +202,7 @@ function Clean-AnswerLine {
   param([string]$Line)
   if (-not $Line) { return '' }
   $value = $Line.Trim()
+  $value = $value -replace '^(?i)(final\s+answer\s*:|answer\s*:)', ''
   $value = $value -replace '^[\-\*\u2022]+\s*',''
   $value = $value -replace '^\d+[\.)]\s*',''
   return $value.Trim()
