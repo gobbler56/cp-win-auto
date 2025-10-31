@@ -96,7 +96,19 @@ function Ensure-RegistryValue {
     if (-not $resolvedPath) { return $false }
 
     if (-not (Test-Path -LiteralPath $resolvedPath)) {
-      New-Item -Path $resolvedPath -Force | Out-Null
+      # Create missing key (handles nested under existing parents)
+      try {
+        New-Item -Path $resolvedPath -Force -ErrorAction Stop | Out-Null
+      } catch {
+        # If parent is missing, create parent+leaf explicitly
+        $parent = Split-Path -Path $resolvedPath -Parent
+        $leaf   = Split-Path -Path $resolvedPath -Leaf
+        if ($parent -and (Test-Path $parent)) {
+          New-Item -Path $parent -Name $leaf -ItemType RegistryKey -Force | Out-Null
+        } else {
+          throw
+        }
+      }
     }
 
     if ($Type -eq 'DWord') { $Value = [int]$Value }
