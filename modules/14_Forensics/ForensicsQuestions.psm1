@@ -8,6 +8,7 @@ if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
 }
 
 $script:ModuleName            = 'ForensicsQuestions'
+$script:ModulePath            = if ($PSCommandPath) { $PSCommandPath } elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $null }
 $script:ApiUrl                = 'https://openrouter.ai/api/v1/chat/completions'
 $script:ApiKeyEnvVar          = 'OPENROUTER_API_KEY'
 $script:OpenRouterModel       = if ($env:OPENROUTER_MODEL) { $env:OPENROUTER_MODEL } else { 'openai/gpt-5' }
@@ -718,6 +719,74 @@ function Write-AiResponses {
   }
 }
 
+function Get-ParallelLimit {
+  param([int]$ItemCount)
+
+  if ($ItemCount -le 1) { return 1 }
+
+  $default = [Math]::Max(1, [Environment]::ProcessorCount)
+  $limit = $default
+
+  if ($env:FORENSICS_MAX_PARALLEL) {
+    $configured = 0
+    if ([int]::TryParse($env:FORENSICS_MAX_PARALLEL, [ref]$configured) -and $configured -gt 0) {
+      $limit = $configured
+    }
+  }
+
+  return [Math]::Max(1, [Math]::Min($ItemCount, $limit))
+}
+
+function Invoke-ForensicsFileWorker {
+  param(
+    [Parameter(Mandatory)][System.IO.FileInfo]$File,
+    $Context
+  )
+
+  $result = [pscustomobject]@{ File=$File.FullName; Answered=0; Manual=0; Skipped=0; Errors=0 }
+
+  Write-Info ("Processing {0}" -f $File.FullName)
+
+  try {
+    $content = Read-QuestionContent -Path $File.FullName
+  } catch {
+    Write-Err $_.Exception.Message
+    $result.Errors = 1
+    return $result
+  }
+
+  if (-not (Test-HasPlaceholder -Content $content)) {
+    Write-Info 'Placeholder not found; skipping (already answered).'
+    $result.Skipped = 1
+    return $result
+  }
+
+  try {
+    $outcome = Invoke-ForensicsQuestion -Path $File.FullName -Content $content
+  } catch {
+    Write-Err ("AI workflow failed for {0}: {1}" -f $File.FullName, $_.Exception.Message)
+    $result.Manual = 1
+    return $result
+  }
+
+  Write-AiResponses -Path $File.FullName -Responses $outcome.Responses
+
+  if ($outcome.Status -eq 'Answered') {
+    if (Write-AnswersToFile -Path $File.FullName -Original $content -Answers $outcome.Answers) {
+      Write-Ok ("Answered forensic question in {0}" -f $File.Name)
+      $result.Answered = 1
+    } else {
+      Write-Warn ("Failed to update {0} after receiving answer." -f $File.FullName)
+      $result.Errors = 1
+    }
+  } else {
+    Write-Warn ("Manual review required for {0}" -f $File.FullName)
+    $result.Manual = 1
+  }
+
+  return $result
+}
+
 function Invoke-Apply {
   param($Context)
 
@@ -732,44 +801,54 @@ function Invoke-Apply {
   $skipped = 0
   $errors = 0
 
-  foreach ($file in $files) {
-    Write-Info ("Processing {0}" -f $file.FullName)
-    try {
-      $content = Read-QuestionContent -Path $file.FullName
-    } catch {
-      Write-Err $_.Exception.Message
-      $errors++
-      continue
+  $parallelLimit = Get-ParallelLimit -ItemCount $files.Count
+  $modulePath = $script:ModulePath
+  $results = @()
+
+  if ($parallelLimit -le 1) {
+    foreach ($file in $files) {
+      $results += Invoke-ForensicsFileWorker -File $file -Context $Context
     }
-
-    if (-not (Test-HasPlaceholder -Content $content)) {
-      Write-Info 'Placeholder not found; skipping (already answered).'
-      $skipped++
-      continue
-    }
-
-    try {
-      $outcome = Invoke-ForensicsQuestion -Path $file.FullName -Content $content
-    } catch {
-      Write-Err ("AI workflow failed for {0}: {1}" -f $file.FullName, $_.Exception.Message)
-      $manual++
-      continue
-    }
-
-    Write-AiResponses -Path $file.FullName -Responses $outcome.Responses
-
-    if ($outcome.Status -eq 'Answered') {
-      if (Write-AnswersToFile -Path $file.FullName -Original $content -Answers $outcome.Answers) {
-        Write-Ok ("Answered forensic question in {0}" -f $file.Name)
-        $answered++
-      } else {
-        Write-Warn ("Failed to update {0} after receiving answer." -f $file.FullName)
-        $errors++
+  } else {
+    $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
+    if ($isPS7) {
+      $job = $files | ForEach-Object -Parallel {
+        param($file,$context,$modulePath)
+        if ($modulePath) { Import-Module -Force -DisableNameChecking $modulePath | Out-Null }
+        Invoke-ForensicsFileWorker -File $file -Context $context
+      } -ArgumentList $Context,$modulePath -ThrottleLimit ([Math]::Max(1,$parallelLimit)) -AsJob
+      if ($job) {
+        $results = @(@(Receive-Job -Job $job -Wait -AutoRemoveJob))
       }
     } else {
-      Write-Warn ("Manual review required for {0}" -f $file.FullName)
-      $manual++
+      $haveThreadJob = $false
+      try { Import-Module ThreadJob -ErrorAction Stop | Out-Null; $haveThreadJob = $true } catch {}
+      if ($haveThreadJob) {
+        $jobs = foreach ($file in $files) {
+          Start-ThreadJob -ScriptBlock {
+            param($file,$context,$modulePath)
+            if ($modulePath) { Import-Module -Force -DisableNameChecking $modulePath | Out-Null }
+            Invoke-ForensicsFileWorker -File $file -Context $context
+          } -ArgumentList $file,$Context,$modulePath
+        }
+        if ($jobs) {
+          $results = @(@(Receive-Job -Job $jobs -Wait -AutoRemoveJob))
+        }
+      } else {
+        Write-Warn 'ThreadJob module not available; processing forensic questions sequentially.'
+        foreach ($file in $files) {
+          $results += Invoke-ForensicsFileWorker -File $file -Context $Context
+        }
+      }
     }
+  }
+
+  foreach ($entry in $results) {
+    if ($null -eq $entry -or -not ($entry -is [psobject])) { continue }
+    if ($entry.PSObject.Properties['Answered']) { $answered += [int]$entry.Answered }
+    if ($entry.PSObject.Properties['Manual'])   { $manual   += [int]$entry.Manual }
+    if ($entry.PSObject.Properties['Skipped'])  { $skipped  += [int]$entry.Skipped }
+    if ($entry.PSObject.Properties['Errors'])   { $errors   += [int]$entry.Errors }
   }
 
   $message = "Answered $answered question(s); $manual pending manual review; $skipped already complete; $errors error(s)."
