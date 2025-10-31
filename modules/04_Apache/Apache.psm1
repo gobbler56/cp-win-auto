@@ -58,7 +58,9 @@ function Get-HttpdCandidates {
 }
 
 function Select-HttpdPath {
-  $candidates = Get-HttpdCandidates
+  # Always treat the results as an array so we can safely rely on Count and
+  # index-based access even when only a single candidate is discovered.
+  [array]$candidates = Get-HttpdCandidates
 
   Write-Host ''
   Write-Host 'Select the Apache httpd.conf file to replace:' -ForegroundColor Cyan
