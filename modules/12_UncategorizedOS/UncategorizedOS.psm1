@@ -49,12 +49,38 @@ function Is-LegacyGadgetOS {
 }
 
 function Ensure-HkuDrive {
-  if (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue) { return }
+  if (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue) { return 'HKU:' }
   try {
     New-PSDrive -Name 'HKU' -PSProvider Registry -Root 'HKEY_USERS' -ErrorAction Stop | Out-Null
+    return 'HKU:'
   } catch {
+    if (Test-Path 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue) {
+      return 'Registry::HKEY_USERS'
+    }
     Write-Warn ("Failed to create HKU drive: {0}" -f $_.Exception.Message)
+    return $null
   }
+}
+
+function Resolve-RegistryPath {
+  param(
+    [Parameter(Mandatory)][string]$Path
+  )
+
+  if ($Path -like 'HKU:*') {
+    $hkuRoot = Ensure-HkuDrive
+    if (-not $hkuRoot) {
+      Write-Info ("Skipping {0} because HKU registry hive is unavailable." -f $Path)
+      return $null
+    }
+
+    if ($hkuRoot -eq 'HKU:') { return $Path }
+
+    $relative = $Path -replace '^HKU:\\', ''
+    return (Join-Path $hkuRoot $relative)
+  }
+
+  return $Path
 }
 
 function Ensure-RegistryValue {
@@ -66,21 +92,17 @@ function Ensure-RegistryValue {
   )
 
   try {
-    if ($Path -like 'HKU:*') {
-      Ensure-HkuDrive
-      if (-not (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue)) {
-        throw "HKU PSDrive unavailable"
-      }
-    }
+    $resolvedPath = Resolve-RegistryPath -Path $Path
+    if (-not $resolvedPath) { return $false }
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-      New-Item -Path $Path -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+      New-Item -Path $resolvedPath -Force | Out-Null
     }
 
     if ($Type -eq 'DWord') { $Value = [int]$Value }
     elseif ($Type -eq 'QWord') { $Value = [long]$Value }
 
-    New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+    New-ItemProperty -Path $resolvedPath -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
     return $true
   } catch {
     Write-Warn ("Failed to set {0}\{1}: {2}" -f $Path, $Name, $_.Exception.Message)
@@ -92,14 +114,10 @@ function Get-RegistryValueSafe {
   param([string]$Path, [string]$Name)
 
   try {
-    if ($Path -like 'HKU:*') {
-      Ensure-HkuDrive
-      if (-not (Get-PSDrive -Name 'HKU' -ErrorAction SilentlyContinue)) {
-        return $null
-      }
-    }
+    $resolvedPath = Resolve-RegistryPath -Path $Path
+    if (-not $resolvedPath) { return $null }
 
-    return (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name
+    return (Get-ItemProperty -Path $resolvedPath -Name $Name -ErrorAction Stop).$Name
   } catch {
     return $null
   }
@@ -200,10 +218,12 @@ function Ensure-ScreenSaverPolicy {
 
   $userPaths = @('HKCU:\Control Panel\Desktop','HKU:\.DEFAULT\Control Panel\Desktop')
   try {
-    Ensure-HkuDrive
-    foreach ($sidKey in Get-ChildItem -Path 'HKU:' -ErrorAction SilentlyContinue) {
-      if ($sidKey.Name -match 'S-1-5-21-') {
-        $userPaths += (Join-Path $sidKey.PSPath 'Control Panel\Desktop')
+    $hkuRoot = Ensure-HkuDrive
+    if ($hkuRoot) {
+      foreach ($sidKey in Get-ChildItem -Path $hkuRoot -ErrorAction SilentlyContinue) {
+        if ($sidKey.Name -match 'S-1-5-21-') {
+          $userPaths += (Join-Path $sidKey.PSPath 'Control Panel\Desktop')
+        }
       }
     }
   } catch {}
@@ -571,8 +591,8 @@ function Invoke-SharePlan {
 }
 
 function Remove-NonDefaultSharesWithAi {
-  $shares = Get-ShareInventory
-  if (-not $shares -or $shares.Count -eq 0) { return @() }
+  $shares = @(Get-ShareInventory)
+  if ($shares.Count -eq 0) { return @() }
 
   $nonDefault = @($shares | Where-Object { -not $script:DefaultShareNames.Contains($_.Name) })
   if ($nonDefault.Count -eq 0) { return @() }
@@ -581,7 +601,7 @@ function Remove-NonDefaultSharesWithAi {
   $allowed = @()
   if ($readme) {
     try {
-      $allowed = Invoke-SharePlan -Shares $shares -ReadmeText $readme.Content
+      $allowed = @(Invoke-SharePlan -Shares $shares -ReadmeText $readme.Content)
     } catch {
       Write-Warn ("Failed to classify shares via OpenRouter: {0}" -f $_.Exception.Message)
     }
@@ -605,7 +625,7 @@ function Ensure-ShareRestrictions {
   $script:LastRemovedShares = @()
 
   try {
-    $removedShares = Remove-NonDefaultSharesWithAi
+    $removedShares = @(Remove-NonDefaultSharesWithAi)
     if ($removedShares.Count -gt 0) {
       $script:LastRemovedShares = $removedShares
       $changed = $true
