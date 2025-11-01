@@ -58,8 +58,6 @@ function Get-HttpdCandidates {
 }
 
 function Select-HttpdPath {
-  # Always treat the results as an array so we can safely rely on Count and
-  # index-based access even when only a single candidate is discovered.
   [array]$candidates = Get-HttpdCandidates
 
   Write-Host ''
@@ -160,6 +158,7 @@ function Set-HttpdPermissions {
   $dir = Split-Path -Parent $FilePath
   $icacls = Get-Command 'icacls.exe' -EA Stop
 
+  # Build argument arrays so principals with spaces are kept intact.
   $dirArgs = @(
     $dir,
     '/inheritance:e',
@@ -169,9 +168,11 @@ function Set-HttpdPermissions {
     'NT AUTHORITY\Authenticated Users:(OI)(CI)(M)',
     'BUILTIN\Users:(OI)(CI)(RX)'
   )
-  $proc1 = Start-Process -FilePath $icacls.Source -ArgumentList $dirArgs -Wait -PassThru -NoNewWindow
-  if ($proc1.ExitCode -ne 0) {
-    throw ("icacls failed for directory {0} (exit code {1})." -f $dir, $proc1.ExitCode)
+
+  # --- QUOTING FIX: call operator instead of Start-Process ---
+  & $icacls.Source @dirArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw ("icacls failed for directory {0} (exit code {1})." -f $dir, $LASTEXITCODE)
   }
 
   $fileArgs = @(
@@ -179,9 +180,10 @@ function Set-HttpdPermissions {
     '/inheritance:e',
     '/reset'
   )
-  $proc2 = Start-Process -FilePath $icacls.Source -ArgumentList $fileArgs -Wait -PassThru -NoNewWindow
-  if ($proc2.ExitCode -ne 0) {
-    throw ("icacls failed for file {0} (exit code {1})." -f $FilePath, $proc2.ExitCode)
+
+  & $icacls.Source @fileArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw ("icacls failed for file {0} (exit code {1})." -f $FilePath, $LASTEXITCODE)
   }
 }
 
