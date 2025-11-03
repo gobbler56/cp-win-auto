@@ -93,22 +93,82 @@ function Test-PathExcluded {
   return $false
 }
 
-# PS-version-aware EXE enumeration (no silent failure)
-function Get-ExecutableFiles {
-  param([string[]]$Roots, [string[]]$ExcludedPaths = @())
+# Helper function to scan a single root for executables
+function Get-ExecutablesFromRoot {
+  param([string]$Root, [string[]]$ExcludedPaths = @())
 
   $results = New-Object System.Collections.Generic.List[string]
   $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
 
-  foreach ($root in $Roots) {
-    if (-not (Test-Path -LiteralPath $root)) { continue }
-    
-    # Skip if this entire root is excluded
-    if (Test-PathExcluded -Path $root -ExcludedPaths $ExcludedPaths) { continue }
-    
-    try {
-      if ($isPS7) {
-        # Fast path (PS7 / .NET)
+  if (-not (Test-Path -LiteralPath $Root)) { return @() }
+
+  # Skip if this entire root is excluded
+  if (Test-PathExcluded -Path $Root -ExcludedPaths $ExcludedPaths) { return @() }
+
+  try {
+    if ($isPS7) {
+      # Fast path (PS7 / .NET)
+      $opts = [System.IO.EnumerationOptions]::new()
+      $opts.RecurseSubdirectories    = $true
+      $opts.AttributesToSkip         = [System.IO.FileAttributes]::ReparsePoint
+      $opts.IgnoreInaccessible       = $true
+      $opts.ReturnSpecialDirectories = $false
+
+      foreach ($path in [System.IO.Directory]::EnumerateFiles($Root, '*.exe', $opts)) {
+        if ($path -like '*\WindowsApps\*') { continue }  # skip UWP sandbox
+        if (Test-PathExcluded -Path $path -ExcludedPaths $ExcludedPaths) { continue }
+        $results.Add($path)
+      }
+    } else {
+      # Reliable path (Windows PowerShell 5.1)
+      Get-ChildItem -LiteralPath $Root -Filter *.exe -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-PathExcluded -Path $_.FullName -ExcludedPaths $ExcludedPaths) } |
+        ForEach-Object { $results.Add($_.FullName) }
+    }
+  } catch {
+    # Ignore inaccessible subtrees and keep going
+  }
+  return @($results)
+}
+
+# PS-version-aware EXE enumeration with parallel root scanning
+function Get-ExecutableFiles {
+  param([string[]]$Roots, [string[]]$ExcludedPaths = @())
+
+  if (-not $Roots -or $Roots.Count -eq 0) { return @() }
+
+  $allResults = New-Object System.Collections.Generic.List[string]
+  $isPS7 = ($PSVersionTable.PSVersion.Major -ge 7)
+
+  # If only one root, process sequentially (no overhead)
+  if ($Roots.Count -eq 1) {
+    return @(Get-ExecutablesFromRoot -Root $Roots[0] -ExcludedPaths $ExcludedPaths)
+  }
+
+  # Parallel processing for multiple roots
+  $parallelLimit = [Math]::Max(1, [Math]::Min($Roots.Count, [Environment]::ProcessorCount))
+  $results = @()
+
+  if ($isPS7) {
+    # PS7: Use ForEach-Object -Parallel
+    $job = $Roots | ForEach-Object -Parallel {
+      param($root, $excludedPaths)
+
+      $results = New-Object System.Collections.Generic.List[string]
+
+      # Test-PathExcluded helper
+      function Test-PathExcluded {
+        param([string]$Path, [string[]]$ExcludedPaths)
+        foreach ($excluded in $ExcludedPaths) {
+          if ($Path -like "$excluded*") { return $true }
+        }
+        return $false
+      }
+
+      if (-not (Test-Path -LiteralPath $root)) { return @() }
+      if (Test-PathExcluded -Path $root -ExcludedPaths $excludedPaths) { return @() }
+
+      try {
         $opts = [System.IO.EnumerationOptions]::new()
         $opts.RecurseSubdirectories    = $true
         $opts.AttributesToSkip         = [System.IO.FileAttributes]::ReparsePoint
@@ -116,21 +176,75 @@ function Get-ExecutableFiles {
         $opts.ReturnSpecialDirectories = $false
 
         foreach ($path in [System.IO.Directory]::EnumerateFiles($root, '*.exe', $opts)) {
-          if ($path -like '*\WindowsApps\*') { continue }  # skip UWP sandbox
-          if (Test-PathExcluded -Path $path -ExcludedPaths $ExcludedPaths) { continue }
+          if ($path -like '*\WindowsApps\*') { continue }
+          if (Test-PathExcluded -Path $path -ExcludedPaths $excludedPaths) { continue }
           $results.Add($path)
         }
-      } else {
-        # Reliable path (Windows PowerShell 5.1)
-        Get-ChildItem -LiteralPath $root -Filter *.exe -File -Recurse -Force -ErrorAction SilentlyContinue |
-          Where-Object { -not (Test-PathExcluded -Path $_.FullName -ExcludedPaths $ExcludedPaths) } |
-          ForEach-Object { $results.Add($_.FullName) }
+      } catch {
+        # Ignore inaccessible subtrees
       }
-    } catch {
-      # Ignore inaccessible subtrees and keep going
+      return @($results)
+    } -ArgumentList $ExcludedPaths -ThrottleLimit $parallelLimit -AsJob
+
+    if ($job) {
+      $results = @(Receive-Job -Job $job -Wait -AutoRemoveJob)
+    }
+  } else {
+    # PS5.1: Try ThreadJob, fallback to sequential
+    $haveThreadJob = $false
+    try { Import-Module ThreadJob -ErrorAction Stop; $haveThreadJob = $true } catch {}
+
+    if ($haveThreadJob) {
+      $jobs = foreach ($root in $Roots) {
+        Start-ThreadJob -ScriptBlock {
+          param($root, $excludedPaths)
+
+          $results = New-Object System.Collections.Generic.List[string]
+
+          function Test-PathExcluded {
+            param([string]$Path, [string[]]$ExcludedPaths)
+            foreach ($excluded in $ExcludedPaths) {
+              if ($Path -like "$excluded*") { return $true }
+            }
+            return $false
+          }
+
+          if (-not (Test-Path -LiteralPath $root)) { return @() }
+          if (Test-PathExcluded -Path $root -ExcludedPaths $excludedPaths) { return @() }
+
+          try {
+            Get-ChildItem -LiteralPath $root -Filter *.exe -File -Recurse -Force -ErrorAction SilentlyContinue |
+              Where-Object { -not (Test-PathExcluded -Path $_.FullName -ExcludedPaths $excludedPaths) } |
+              ForEach-Object { $results.Add($_.FullName) }
+          } catch {
+            # Ignore inaccessible subtrees
+          }
+          return @($results)
+        } -ArgumentList $root,$ExcludedPaths
+      }
+      if ($jobs) {
+        $results = @(Receive-Job -Job $jobs -Wait -AutoRemoveJob)
+      }
+    } else {
+      # Fallback: sequential processing
+      foreach ($root in $Roots) {
+        $results += @(Get-ExecutablesFromRoot -Root $root -ExcludedPaths $ExcludedPaths)
+      }
     }
   }
-  $results | Select-Object -Unique
+
+  # Flatten and deduplicate results
+  foreach ($result in $results) {
+    if ($result -is [array]) {
+      foreach ($item in $result) {
+        if ($item) { $allResults.Add($item) }
+      }
+    } elseif ($result) {
+      $allResults.Add($result)
+    }
+  }
+
+  return @($allResults | Select-Object -Unique)
 }
 
 function Bump-UninstallRegistry {
