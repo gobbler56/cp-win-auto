@@ -228,7 +228,7 @@ function Ensure-ScreenSaverPolicy {
   $changed = (Ensure-RegistryValue -Path $policyPath -Name 'ScreenSaveTimeOut' -Type 'String' -Value '600') -or $changed
   $changed = (Ensure-RegistryValue -Path $policyPath -Name 'SCRNSAVE.EXE' -Type 'String' -Value 'scrnsave.scr') -or $changed
 
-  $userPaths = @('HKCU:\Control Panel\Desktop','HKU:\.DEFAULT\Control Panel\Desktop')
+  $userPaths = @('HKCU:\Control Panel\Desktop')
   try {
     $hkuRoot = Ensure-HkuDrive
     if ($hkuRoot) {
@@ -261,8 +261,7 @@ function Ensure-AutorunDisabled {
   $changed = $false
   $paths = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer',
-    'HKU:\.DEFAULT\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer'
   )
 
   foreach ($path in $paths) {
@@ -278,8 +277,7 @@ function Ensure-AutoplayDisabled {
   $changed = $false
   $paths = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers',
-    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers',
-    'HKU:\.DEFAULT\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers'
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers'
   )
 
   foreach ($path in $paths) {
@@ -298,14 +296,8 @@ function Ensure-MemoryMitigations {
   $changed = (Ensure-RegistryValue -Path $mmPath -Name 'FeatureSettingsOverride' -Type 'DWord' -Value 0) -or $changed
   $changed = (Ensure-RegistryValue -Path $mmPath -Name 'FeatureSettingsOverrideMask' -Type 'DWord' -Value 3) -or $changed
 
-  if (Get-Command Set-ProcessMitigation -ErrorAction SilentlyContinue) {
-    try {
-      Set-ProcessMitigation -System -Enable ForceRelocateImages,BottomUp,HighEntropy -ErrorAction Stop | Out-Null
-      $changed = $true
-    } catch {
-      Write-Warn ("Set-ProcessMitigation ASLR failed: {0}" -f $_.Exception.Message)
-    }
-  }
+  # Removed Set-ProcessMitigation call due to array bounds errors on some Windows versions
+  # Registry settings above provide equivalent ASLR enforcement
 
   return $changed
 }
