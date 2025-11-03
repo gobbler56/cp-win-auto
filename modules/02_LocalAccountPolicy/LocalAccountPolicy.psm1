@@ -8,10 +8,10 @@ if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
 }
 
 $script:ModuleName          = 'LocalAccountPolicy'
-$script:PolicyArchiveUrl    = 'https://storage.googleapis.com/sigma.00.edu.ci/server22.zip'
-$script:PolicyArchivePath   = 'C:\\server22.zip'
-$script:PolicyExtractRoot   = 'C:\\server22'
-$script:PolicyPayloadFolder = 'server22'
+$script:PolicyArchiveUrl    = 'https://storage.googleapis.com/sigma.00.edu.ci/policies.zip'
+$script:PolicyArchivePath   = 'C:\\policies.zip'
+$script:PolicyExtractRoot   = 'C:\\policies'
+$script:PolicyPayloadFolder = ''
 
 function Test-Ready {
   param($Context)
@@ -113,7 +113,7 @@ function Invoke-PolicyImport {
   Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force -ErrorAction Stop
 
   if (-not (Test-Path $payloadRoot)) {
-    throw ("Extracted archive did not contain expected folder '{0}'" -f $script:PolicyPayloadFolder)
+    throw ("Failed to extract policy archive to '{0}'" -f $payloadRoot)
   }
 
   $groupPolicySource = Join-Path $payloadRoot 'GroupPolicy'
