@@ -496,7 +496,8 @@ function Parse-RegServices {
   $map
 }
 
-function TI-ApplyStartValues([hashtable]$Map) {
+function TI-ApplyStartValues {
+  param([hashtable]$Map)
   # Assume NtObjectManager is already installed by Dependencies module
   try { 
     Import-Module NtObjectManager -Force -ErrorAction Stop 
@@ -638,7 +639,8 @@ foreach(`$k in `$pairs.Keys){
   }
 }
 
-function Apply-ServiceState([string]$Name, [int]$Start) {
+function Apply-ServiceState {
+  param([string]$Name, [int]$Start)
   $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
   if (-not $svc) { return }
   try {
