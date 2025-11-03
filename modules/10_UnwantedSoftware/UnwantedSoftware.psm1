@@ -333,6 +333,54 @@ function Invoke-Classification {
   return @($paths | Sort-Object -Unique)
 }
 
+function Stop-ProcessesForPath {
+  param([string]$Path)
+
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+
+  $processNames = @()
+
+  # If the path is an executable, add it directly
+  if ((Test-Path -LiteralPath $Path -PathType Leaf) -and $Path -like '*.exe') {
+    $processNames += [System.IO.Path]::GetFileNameWithoutExtension($Path)
+  }
+  # If it's a directory, find all .exe files in it
+  elseif (Test-Path -LiteralPath $Path -PathType Container) {
+    try {
+      $exeFiles = Get-ChildItem -LiteralPath $Path -Recurse -Filter '*.exe' -File -ErrorAction SilentlyContinue
+      foreach ($exe in $exeFiles) {
+        $processNames += [System.IO.Path]::GetFileNameWithoutExtension($exe.Name)
+      }
+    } catch {
+      # Silently continue if we can't enumerate
+    }
+  }
+
+  # Remove duplicates
+  $processNames = $processNames | Select-Object -Unique
+
+  # Kill each process
+  foreach ($procName in $processNames) {
+    try {
+      $processes = Get-Process -Name $procName -ErrorAction SilentlyContinue
+      if ($processes) {
+        foreach ($proc in $processes) {
+          try {
+            Write-Info ("Stopping process: {0} (PID {1})" -f $proc.Name, $proc.Id)
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+          } catch {
+            Write-Warn ("Failed to stop process {0}: {1}" -f $proc.Name, $_.Exception.Message)
+          }
+        }
+      }
+    } catch {
+      # Process doesn't exist or already stopped
+    }
+  }
+}
+
 function Invoke-UnwantedSoftwareAssessment {
   param([switch]$Remove)
 
@@ -379,16 +427,49 @@ function Invoke-UnwantedSoftwareAssessment {
 
     if ($confirmation.Trim().StartsWith('Y', [System.StringComparison]::OrdinalIgnoreCase)) {
       foreach ($path in $condensed) {
-        try {
-          if (Test-Path -LiteralPath $path) {
+        $attemptCount = 0
+        $maxAttempts = 2
+        $success = $false
+
+        while ($attemptCount -lt $maxAttempts -and -not $success) {
+          $attemptCount++
+
+          try {
+            if (-not (Test-Path -LiteralPath $path)) {
+              Write-Warn ("Path not found during removal: {0}" -f $path)
+              break
+            }
+
+            # Kill any running processes before removal
+            if ($attemptCount -eq 1) {
+              Stop-ProcessesForPath -Path $path
+              Start-Sleep -Milliseconds 500  # Brief pause to let processes fully terminate
+            }
+
             Write-Info ("Removing unauthorized software at {0}" -f $path)
             Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
             $removed += $path
-          } else {
-            Write-Warn ("Path not found during removal: {0}" -f $path)
+            $success = $true
+
+          } catch {
+            $errorMsg = $_.Exception.Message
+            $isInUseError = $errorMsg -match 'in use|being used|cannot access|locked'
+
+            if ($isInUseError -and $attemptCount -lt $maxAttempts) {
+              Write-Warn ("Failed to remove {0}: {1}" -f $path, $errorMsg)
+              Write-Host ''
+              Write-Host "The file may still be in use by a running process."
+              $retry = Read-Host "Please manually stop any related processes and press ENTER to retry, or type 'skip' to skip this item"
+
+              if ($retry.Trim() -match '^skip') {
+                Write-Info ("Skipping {0}" -f $path)
+                break
+              }
+            } else {
+              Write-Warn ("Failed to remove {0}: {1}" -f $path, $errorMsg)
+              break
+            }
           }
-        } catch {
-          Write-Warn ("Failed to remove {0}: {1}" -f $path, $_.Exception.Message)
         }
       }
     } else {
