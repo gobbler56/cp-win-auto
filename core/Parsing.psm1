@@ -33,12 +33,30 @@ function Remove-HTMLTags {
 function Get-ReadmeHtmlFromUrlFile {
     [CmdletBinding()]
     param(
+        [string]$AeacusReadmePath = 'C:\aeacus\assets\ReadMe.html',
         [string[]]$Candidates = @(
             'C:\CyberPatriot\README.url',
             (Join-Path $env:PUBLIC     'Desktop\README.url'),
             (Join-Path $env:USERPROFILE 'Desktop\README.url')
         )
     )
+
+    # Check for Aeacus practice image README first
+    if (Test-Path -LiteralPath $AeacusReadmePath) {
+        Write-Info "[Readme] Found Aeacus practice image README at: $AeacusReadmePath"
+        try {
+            $htmlContent = Get-Content -LiteralPath $AeacusReadmePath -Raw -ErrorAction Stop
+            return [pscustomobject]@{
+                Url  = "file:///$AeacusReadmePath"
+                Html = $htmlContent
+            }
+        } catch {
+            Write-Warning ("Failed to read Aeacus README from {0}: {1}" -f $AeacusReadmePath, $_.Exception.Message)
+            # Fall through to CyberPatriot logic
+        }
+    }
+
+    # Fall back to CyberPatriot competition README logic
     foreach ($p in $Candidates) {
         if (-not (Test-Path -LiteralPath $p)) { continue }
         $line = Get-Content -LiteralPath $p -ErrorAction Stop |
