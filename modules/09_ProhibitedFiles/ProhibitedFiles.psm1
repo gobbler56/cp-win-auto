@@ -277,7 +277,8 @@ function Get-ProhibitedFileCandidates {
     if ($results.Count -ge $script:MaxCandidates -or $limitHit) { break }
   }
 
-  $unique = @($results | Sort-Object Path)
+  # Always treat the results as an array so we can safely rely on Count
+  [array]$unique = @($results | Sort-Object Path)
   $originalCount = if ($limitHit) { $script:MaxCandidates } else { $unique.Count }
   return [pscustomobject]@{ Items = $unique; OriginalCount = $originalCount; Truncated = $limitHit }
 }
@@ -425,7 +426,8 @@ function Invoke-ProhibitedFilesAssessment {
 
   Write-Info 'Collecting potential prohibited files'
   $candidatesInfo = Get-ProhibitedFileCandidates
-  $candidates = $candidatesInfo.Items
+  # Always treat the results as an array so we can safely rely on Count
+  [array]$candidates = $candidatesInfo.Items
 
   if (-not $candidates -or $candidates.Count -eq 0) {
     return [pscustomobject]@{
@@ -462,7 +464,8 @@ function Invoke-ProhibitedFilesAssessment {
   }
 
   Write-Info 'Requesting AI classification of prohibited files'
-  $flagged = Invoke-Classification -Candidates $candidates -ReadmeText $readmeText
+  # Always treat the results as an array so we can safely rely on Count
+  [array]$flagged = Invoke-Classification -Candidates $candidates -ReadmeText $readmeText
 
   if (-not $flagged -or $flagged.Count -eq 0) {
     return [pscustomobject]@{
@@ -476,13 +479,15 @@ function Invoke-ProhibitedFilesAssessment {
     }
   }
 
-  $condensed = Get-CondensedPaths -Paths $flagged
+  # Always treat the results as an array so we can safely rely on Count
+  [array]$condensed = Get-CondensedPaths -Paths $flagged
   Write-Info 'AI flagged the following items for removal:'
   foreach ($entry in $flagged) {
     Write-Host ("  - {0}" -f $entry)
   }
 
-  $removed = @()
+  # Always treat the results as an array so we can safely rely on Count
+  [array]$removed = @()
   $userDeclined = $false
   if ($Remove) {
     $confirmation = Read-Host 'Remove the listed files now? (Y/N, default Y)'
