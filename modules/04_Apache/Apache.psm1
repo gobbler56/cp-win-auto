@@ -20,12 +20,6 @@ $script:PathPatterns    = @(
 function Test-Ready {
   param($Context)
 
-  $icacls = Get-Command 'icacls.exe' -EA SilentlyContinue
-  if (-not $icacls) {
-    Write-Warn 'icacls.exe not found; unable to reset permissions.'
-    return $false
-  }
-
   if (-not (Get-Command Invoke-WebRequest -EA SilentlyContinue)) {
     Write-Warn 'Invoke-WebRequest is unavailable; cannot download Apache configuration.'
     return $false
@@ -152,40 +146,6 @@ function Invoke-ReplaceHttpdConfig {
   Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
 }
 
-function Set-HttpdPermissions {
-  param([Parameter(Mandatory)][string]$FilePath)
-
-  $dir = Split-Path -Parent $FilePath
-  $icacls = Get-Command 'icacls.exe' -EA Stop
-
-  # Build argument arrays so principals with spaces are kept intact.
-  $dirArgs = @(
-    $dir,
-    '/inheritance:e',
-    '/grant:r',
-    'BUILTIN\Administrators:(OI)(CI)(F)',
-    'NT AUTHORITY\SYSTEM:(OI)(CI)(F)',
-    'NT AUTHORITY\Authenticated Users:(OI)(CI)(M)',
-    'BUILTIN\Users:(OI)(CI)(RX)'
-  )
-
-  # --- QUOTING FIX: call operator instead of Start-Process ---
-  & $icacls.Source @dirArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw ("icacls failed for directory {0} (exit code {1})." -f $dir, $LASTEXITCODE)
-  }
-
-  $fileArgs = @(
-    $FilePath,
-    '/inheritance:e',
-    '/reset'
-  )
-
-  & $icacls.Source @fileArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw ("icacls failed for file {0} (exit code {1})." -f $FilePath, $LASTEXITCODE)
-  }
-}
 
 function Get-FileHashText {
   param([Parameter(Mandatory)][string]$Path)
@@ -244,9 +204,7 @@ function Invoke-Apply {
       Remove-Item -LiteralPath $downloaded -ErrorAction SilentlyContinue
     }
 
-    Set-HttpdPermissions -FilePath $target
-
-    return (New-ModuleResult -Name $script:ModuleName -Status 'Succeeded' -Message 'Replaced Apache configuration and reset permissions.')
+    return (New-ModuleResult -Name $script:ModuleName -Status 'Succeeded' -Message 'Replaced Apache configuration.')
   }
   catch {
     Write-Err ("Apache module failed: {0}" -f $_.Exception.Message)
