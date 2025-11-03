@@ -8,6 +8,7 @@ if (-not (Get-Command Write-Info -EA SilentlyContinue)) {
 }
 
 $script:ModuleName = 'RDPHardening'
+$script:CustomRdpPort = 3390  # Change from default 3389 to non-standard port
 
 # ---- Helper Functions --------------------------------------------------------
 
@@ -246,6 +247,127 @@ function Set-LsaAuthHardening {
   return $changed
 }
 
+# ---- Change RDP Port ---------------------------------------------------------
+
+function Set-RdpPort {
+  param([int]$Port = $script:CustomRdpPort)
+
+  $changed = $false
+  $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+
+  Write-Info "Changing RDP port from 3389 to $Port"
+  $changed = (Ensure-RegistryValue -Path $rdpTcpPath -Name 'PortNumber' -Type 'DWord' -Value $Port) -or $changed
+
+  return $changed
+}
+
+function Get-CurrentRdpPort {
+  $rdpTcpPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+  $port = Get-RegistryValueSafe -Path $rdpTcpPath -Name 'PortNumber'
+
+  if ($null -eq $port) {
+    return 3389  # Default RDP port
+  }
+
+  return $port
+}
+
+# ---- Update Firewall Rules for Custom RDP Port -------------------------------
+
+function Update-RdpFirewallRules {
+  param([int]$Port = $script:CustomRdpPort)
+
+  $changed = $false
+
+  try {
+    # Try using New-NetFirewallRule (modern PowerShell cmdlet)
+    if (Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue) {
+      Write-Info 'Managing RDP firewall rules using New-NetFirewallRule'
+
+      # Remove or disable existing default RDP rules
+      $existingRules = @(Get-NetFirewallRule -Name 'RemoteDesktop*' -ErrorAction SilentlyContinue)
+      foreach ($rule in $existingRules) {
+        Write-Info "Disabling default RDP rule: $($rule.Name)"
+        Set-NetFirewallRule -Name $rule.Name -Enabled False -ErrorAction SilentlyContinue
+        $changed = $true
+      }
+
+      # Check if custom RDP rule already exists
+      $customRuleName = 'RemoteDesktop-UserMode-In-TCP-Custom'
+      $existingCustom = Get-NetFirewallRule -Name $customRuleName -ErrorAction SilentlyContinue
+
+      if ($existingCustom) {
+        Write-Info "Updating existing custom RDP firewall rule for port $Port"
+        Set-NetFirewallRule -Name $customRuleName -LocalPort $Port -ErrorAction Stop
+        $changed = $true
+      } else {
+        Write-Info "Creating new firewall rule for RDP on port $Port"
+        New-NetFirewallRule `
+          -Name $customRuleName `
+          -DisplayName "Remote Desktop - Custom Port (TCP-In)" `
+          -Description "Inbound rule for Remote Desktop on custom port $Port" `
+          -Group 'Remote Desktop' `
+          -Enabled True `
+          -Direction Inbound `
+          -Protocol TCP `
+          -LocalPort $Port `
+          -Profile Any `
+          -Action Allow `
+          -ErrorAction Stop | Out-Null
+        $changed = $true
+      }
+
+      # Create UDP rule as well (for RDP 8.0+ UDP transport)
+      $customRuleNameUdp = 'RemoteDesktop-UserMode-In-UDP-Custom'
+      $existingCustomUdp = Get-NetFirewallRule -Name $customRuleNameUdp -ErrorAction SilentlyContinue
+
+      if ($existingCustomUdp) {
+        Write-Info "Updating existing custom RDP UDP firewall rule for port $Port"
+        Set-NetFirewallRule -Name $customRuleNameUdp -LocalPort $Port -ErrorAction Stop
+        $changed = $true
+      } else {
+        Write-Info "Creating new UDP firewall rule for RDP on port $Port"
+        New-NetFirewallRule `
+          -Name $customRuleNameUdp `
+          -DisplayName "Remote Desktop - Custom Port (UDP-In)" `
+          -Description "Inbound rule for Remote Desktop UDP on custom port $Port" `
+          -Group 'Remote Desktop' `
+          -Enabled True `
+          -Direction Inbound `
+          -Protocol UDP `
+          -LocalPort $Port `
+          -Profile Any `
+          -Action Allow `
+          -ErrorAction Stop | Out-Null
+        $changed = $true
+      }
+
+    } else {
+      # Fallback to netsh for older systems
+      Write-Info 'Managing RDP firewall rules using netsh'
+
+      # Delete existing RDP rules on port 3389
+      Write-Info 'Removing default RDP firewall rules on port 3389'
+      & netsh advfirewall firewall delete rule name="Remote Desktop - User Mode (TCP-In)" protocol=TCP localport=3389 2>$null | Out-Null
+      & netsh advfirewall firewall delete rule name="Remote Desktop - User Mode (UDP-In)" protocol=UDP localport=3389 2>$null | Out-Null
+
+      # Add new rules for custom port
+      Write-Info "Adding firewall rule for RDP TCP on port $Port"
+      & netsh advfirewall firewall add rule name="Remote Desktop - Custom Port (TCP-In)" dir=in action=allow protocol=TCP localport=$Port enable=yes profile=any 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { $changed = $true }
+
+      Write-Info "Adding firewall rule for RDP UDP on port $Port"
+      & netsh advfirewall firewall add rule name="Remote Desktop - Custom Port (UDP-In)" dir=in action=allow protocol=UDP localport=$Port enable=yes profile=any 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { $changed = $true }
+    }
+
+  } catch {
+    Write-Warn ("Failed to update firewall rules: {0}" -f $_.Exception.Message)
+  }
+
+  return $changed
+}
+
 # ---- Main Apply/Verify Functions ---------------------------------------------
 
 function Test-Ready {
@@ -270,6 +392,8 @@ function Invoke-Apply {
     if (Disable-WeakCiphers) { $changes += 'Disabled weak ciphers' }
     if (Set-CredsspEncryptionOracle) { $changes += 'Locked down CredSSP encryption oracle' }
     if (Set-LsaAuthHardening) { $changes += 'Applied LSA/auth hardening' }
+    if (Set-RdpPort -Port $script:CustomRdpPort) { $changes += "Changed RDP port to $script:CustomRdpPort" }
+    if (Update-RdpFirewallRules -Port $script:CustomRdpPort) { $changes += "Updated firewall rules for port $script:CustomRdpPort" }
 
     $message = if ($changes.Count -gt 0) {
       'RDP hardening applied: ' + ($changes -join '; ')
@@ -278,6 +402,7 @@ function Invoke-Apply {
     }
 
     Write-Info 'NOTE: Some SCHANNEL and LSA changes require a reboot to fully apply'
+    Write-Info "NOTE: RDP is now listening on port $script:CustomRdpPort (changed from default 3389)"
 
     return (New-ModuleResult -Name $script:ModuleName -Status 'Succeeded' -Message $message)
   } catch {
@@ -331,7 +456,22 @@ function Invoke-Verify {
   $lsaHardened = (Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LmCompatibilityLevel') -eq 5
   $checks += "LSA=$(if ($lsaHardened) { 'Hardened' } else { 'Weak' })"
 
-  $status = if ($checks -match 'Disabled|NotRequired|NotEnforced|Weak|Allowed|Enabled' -and $checks -notmatch 'RDP=Enabled') {
+  # Check RDP port
+  $currentPort = Get-CurrentRdpPort
+  $portChanged = ($currentPort -eq $script:CustomRdpPort)
+  $checks += "Port=$(if ($portChanged) { $script:CustomRdpPort } else { "$currentPort(Default)" })"
+
+  # Check firewall rule exists for custom port
+  $firewallConfigured = $false
+  try {
+    if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
+      $customRule = Get-NetFirewallRule -Name 'RemoteDesktop-UserMode-In-TCP-Custom' -ErrorAction SilentlyContinue
+      $firewallConfigured = ($null -ne $customRule -and $customRule.Enabled -eq $true)
+    }
+  } catch {}
+  $checks += "Firewall=$(if ($firewallConfigured) { 'Configured' } else { 'NeedsConfig' })"
+
+  $status = if ($checks -match 'Disabled|NotRequired|NotEnforced|Weak|Allowed|Enabled|NeedsConfig|Default' -and $checks -notmatch 'RDP=Enabled') {
     'NeedsAttention'
   } else {
     'Succeeded'
