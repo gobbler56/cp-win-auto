@@ -51,38 +51,287 @@ function Invoke-ImportFirewallProfile {
   }
 }
 
+function Invoke-ConfigureASRRules {
+  Write-Info 'Configuring Attack Surface Reduction rules'
+
+  # All current ASR rule GUIDs
+  $asrRules = @(
+    '56a863a9-875e-4185-98a7-b882c64b5ce5', # Block abuse of exploited vulnerable signed drivers
+    '7674ba52-37eb-4a4f-a9a1-f0f9a1619a2c', # Block Adobe Reader from creating child processes
+    'd4f940ab-401b-4efc-aadc-ad5f3c50688a', # Block all Office applications from creating child processes
+    '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2', # Block credential stealing from lsass.exe
+    'be9ba2d9-53ea-4cdc-84e5-9b1eeee46550', # Block executable content from email client and webmail
+    '01443614-cd74-433a-b99e-2ecdc07bfc25', # Block executable files unless prevalence/age/trusted criteria met
+    '5beb7efe-fd9a-4556-801d-275e5ffc04cc', # Block execution of potentially obfuscated scripts
+    'd3e037e1-3eb8-44c8-a917-57927947596d', # Block JS/VBScript from launching downloaded executables
+    '3b576869-a4ec-4529-8536-b80a7769e899', # Block Office apps from creating executable content
+    '75668c1f-73b5-4cf0-bb93-3ecf5cb7cc84', # Block Office apps from injecting code into other processes
+    '26190899-1602-49e8-8b27-eb1d0a1ce869', # Block Office comms apps from creating child processes
+    'e6db77e5-3df2-4cf1-b95a-636979351e5b', # Block persistence via WMI event subscription
+    'd1e49aac-8f56-4280-b9ba-993a6d77406c', # Block process creations from PSExec and WMI commands
+    '33ddedf1-c6e0-47cb-833e-de6133960387', # Block rebooting into Safe Mode
+    'b2b3f03d-6a65-4f7b-a9c7-1c7ef74a9ba4', # Block untrusted/unsigned processes from USB
+    'c0033c00-d16d-4114-a5a0-dc9b3a7d2ceb', # Block use of copied or impersonated system tools
+    '92e97fa1-2edf-4476-bdd6-9dd0b4dddc7b', # Block Win32 API calls from Office macros
+    'c1db55ab-c21a-4637-bb3f-a12568109d35'  # Use advanced protection against ransomware
+  )
+
+  # Check if running on Windows Server
+  $osInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+  if ($osInfo -and $osInfo.ProductType -ne 1) {
+    Write-Info 'Windows Server detected, adding server-specific ASR rule'
+    $asrRules += 'a8f5898e-1dc8-49a9-9878-85004b8a61e6' # Block Webshell creation for Servers
+  }
+
+  # Apply via Set-MpPreference
+  try {
+    $actions = @()
+    foreach ($rule in $asrRules) {
+      $actions += 'Enabled'
+    }
+    Set-MpPreference -AttackSurfaceReductionRules_Ids $asrRules -AttackSurfaceReductionRules_Actions $actions -ErrorAction Stop
+    Write-Info ("Applied {0} ASR rules via Set-MpPreference" -f $asrRules.Count)
+  } catch {
+    Write-Warn ("Failed to apply ASR rules via Set-MpPreference: {0}" -f $_.Exception.Message)
+  }
+
+  # Also write to policy registry for persistence
+  $asrRegPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules'
+  try {
+    if (-not (Test-Path $asrRegPath)) {
+      New-Item -Path $asrRegPath -Force | Out-Null
+    }
+
+    foreach ($ruleId in $asrRules) {
+      New-ItemProperty -Path $asrRegPath -Name $ruleId -PropertyType String -Value '1' -Force -ErrorAction Stop | Out-Null
+    }
+    Write-Info 'ASR rules written to policy registry (Block mode)'
+  } catch {
+    Write-Warn ("Failed to write ASR rules to registry: {0}" -f $_.Exception.Message)
+  }
+}
+
+function Invoke-HardenDefender {
+  Write-Info 'Hardening Windows Defender protections'
+
+  try {
+    # Enable advanced cloud protection and PUA blocking
+    Set-MpPreference `
+      -MAPSReporting Advanced `
+      -SubmitSamplesConsent SendAllSamples `
+      -CloudBlockLevel High `
+      -DisableBlockAtFirstSeen $false `
+      -DisableIOAVProtection $false `
+      -PUAProtection Enabled `
+      -EnableNetworkProtection Enabled `
+      -EnableControlledFolderAccess Enabled `
+      -ErrorAction Stop
+
+    Write-Info 'Defender cloud protection, PUA, Network Protection, and Controlled Folder Access enabled'
+
+    # Enable Network Protection on downlevel/server if applicable
+    try {
+      Set-MpPreference -AllowNetworkProtectionDownLevel $true -AllowNetworkProtectionOnWinServer $true -ErrorAction SilentlyContinue
+    } catch {
+      # Silently ignore if these settings aren't available
+    }
+  } catch {
+    Write-Warn ("Failed to configure Defender preferences: {0}" -f $_.Exception.Message)
+  }
+}
+
+function Invoke-ConfigureSmartScreen {
+  Write-Info 'Configuring Windows SmartScreen and Edge protections'
+
+  # Windows SmartScreen (Explorer) - Block mode, no bypass
+  $systemPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+  try {
+    if (-not (Test-Path $systemPolicyPath)) {
+      New-Item -Path $systemPolicyPath -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $systemPolicyPath -Name 'EnableSmartScreen' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $systemPolicyPath -Name 'ShellSmartScreenLevel' -PropertyType String -Value 'Block' -Force -ErrorAction Stop | Out-Null
+    Write-Info 'Windows SmartScreen set to Block (no bypass)'
+  } catch {
+    Write-Warn ("Failed to configure Windows SmartScreen: {0}" -f $_.Exception.Message)
+  }
+
+  # Microsoft Edge SmartScreen + PUA blocking
+  $edgePolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+  try {
+    if (-not (Test-Path $edgePolicyPath)) {
+      New-Item -Path $edgePolicyPath -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $edgePolicyPath -Name 'SmartScreenEnabled' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $edgePolicyPath -Name 'SmartScreenPuaEnabled' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+    Write-Info 'Microsoft Edge SmartScreen and PUA blocking enabled'
+  } catch {
+    Write-Warn ("Failed to configure Edge SmartScreen: {0}" -f $_.Exception.Message)
+  }
+}
+
 function Invoke-Verify {
   param($Context)
 
+  $checks = @()
+  $allPassed = $true
+
+  # Check firewall status
   try {
     $output = & netsh advfirewall show currentprofile 2>$null
+    $firewallEnabled = $false
+    if ($output) {
+      $firewallEnabled = ($output -match '(?im)^\s*State\s*ON\b')
+    }
+
+    if ($firewallEnabled) {
+      $checks += 'Firewall: enabled'
+    } else {
+      $checks += 'Firewall: not enabled'
+      $allPassed = $false
+    }
   } catch {
-    return (New-ModuleResult -Name $script:ModuleName -Status 'Failed' -Message 'Failed to query firewall state.')
+    $checks += 'Firewall: check failed'
+    $allPassed = $false
   }
 
-  $enabled = $false
-  if ($output) {
-    $enabled = ($output -match '(?im)^\s*State\s*ON\b')
+  # Check Defender settings
+  try {
+    $mpPref = Get-MpPreference -ErrorAction Stop
+
+    if ($mpPref.PUAProtection -eq 'Enabled' -or $mpPref.PUAProtection -eq 1) {
+      $checks += 'PUA Protection: enabled'
+    } else {
+      $checks += 'PUA Protection: not enabled'
+      $allPassed = $false
+    }
+
+    if ($mpPref.EnableNetworkProtection -eq 'Enabled' -or $mpPref.EnableNetworkProtection -eq 1) {
+      $checks += 'Network Protection: enabled'
+    } else {
+      $checks += 'Network Protection: not enabled'
+      $allPassed = $false
+    }
+
+    if ($mpPref.EnableControlledFolderAccess -eq 'Enabled' -or $mpPref.EnableControlledFolderAccess -eq 1) {
+      $checks += 'Controlled Folder Access: enabled'
+    } else {
+      $checks += 'Controlled Folder Access: not enabled'
+      $allPassed = $false
+    }
+  } catch {
+    $checks += 'Defender: check failed'
+    $allPassed = $false
   }
 
-  if ($enabled) {
-    return (New-ModuleResult -Name $script:ModuleName -Status 'Succeeded' -Message 'Firewall current profile is enabled.')
+  # Check if ASR rules are configured
+  try {
+    $asrRegPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules'
+    if (Test-Path $asrRegPath) {
+      $asrProps = Get-ItemProperty -Path $asrRegPath -ErrorAction SilentlyContinue
+      if ($asrProps) {
+        $ruleCount = ($asrProps.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' } | Measure-Object).Count
+        if ($ruleCount -gt 0) {
+          $checks += "ASR rules: $ruleCount configured"
+        } else {
+          $checks += 'ASR rules: none configured'
+          $allPassed = $false
+        }
+      } else {
+        $checks += 'ASR rules: none configured'
+        $allPassed = $false
+      }
+    } else {
+      $checks += 'ASR rules: not configured'
+      $allPassed = $false
+    }
+  } catch {
+    $checks += 'ASR rules: check failed'
+    $allPassed = $false
   }
 
-  return (New-ModuleResult -Name $script:ModuleName -Status 'Failed' -Message 'Firewall current profile is not enabled.')
+  # Check SmartScreen
+  try {
+    $systemPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+    $smartScreenEnabled = $false
+
+    if (Test-Path $systemPolicyPath) {
+      $props = Get-ItemProperty -Path $systemPolicyPath -ErrorAction SilentlyContinue
+      if ($props -and $props.EnableSmartScreen -eq 1 -and $props.ShellSmartScreenLevel -eq 'Block') {
+        $smartScreenEnabled = $true
+      }
+    }
+
+    if ($smartScreenEnabled) {
+      $checks += 'SmartScreen: enabled (Block mode)'
+    } else {
+      $checks += 'SmartScreen: not properly configured'
+      $allPassed = $false
+    }
+  } catch {
+    $checks += 'SmartScreen: check failed'
+    $allPassed = $false
+  }
+
+  $message = $checks -join '; '
+  $status = if ($allPassed) { 'Succeeded' } else { 'Failed' }
+
+  return (New-ModuleResult -Name $script:ModuleName -Status $status -Message $message)
 }
 
 function Invoke-Apply {
   param($Context)
 
+  $messages = @()
+  $hadError = $false
+
+  # Apply firewall configuration
   try {
     Invoke-DownloadFirewallProfile
     Invoke-ImportFirewallProfile
-    return (New-ModuleResult -Name $script:ModuleName -Status 'Succeeded' -Message 'Imported CyberPatriot firewall configuration.')
+    $messages += 'Firewall configuration imported'
   } catch {
-    Write-Err ("Defensive module failed: {0}" -f $_.Exception.Message)
-    return (New-ModuleResult -Name $script:ModuleName -Status 'Failed' -Message ('Firewall import failed: ' + $_.Exception.Message))
+    Write-Err ("Firewall import failed: {0}" -f $_.Exception.Message)
+    $messages += "Firewall import failed: $($_.Exception.Message)"
+    $hadError = $true
   }
+
+  # Apply ASR rules
+  try {
+    Invoke-ConfigureASRRules
+    $messages += 'ASR rules configured'
+  } catch {
+    Write-Err ("ASR configuration failed: {0}" -f $_.Exception.Message)
+    $messages += "ASR configuration failed: $($_.Exception.Message)"
+    $hadError = $true
+  }
+
+  # Harden Defender
+  try {
+    Invoke-HardenDefender
+    $messages += 'Defender protections hardened'
+  } catch {
+    Write-Err ("Defender hardening failed: {0}" -f $_.Exception.Message)
+    $messages += "Defender hardening failed: $($_.Exception.Message)"
+    $hadError = $true
+  }
+
+  # Configure SmartScreen
+  try {
+    Invoke-ConfigureSmartScreen
+    $messages += 'SmartScreen protections configured'
+  } catch {
+    Write-Err ("SmartScreen configuration failed: {0}" -f $_.Exception.Message)
+    $messages += "SmartScreen configuration failed: $($_.Exception.Message)"
+    $hadError = $true
+  }
+
+  $finalMessage = $messages -join '; '
+  $status = if ($hadError) { 'Failed' } else { 'Succeeded' }
+
+  return (New-ModuleResult -Name $script:ModuleName -Status $status -Message $finalMessage)
 }
 
 Export-ModuleMember -Function Test-Ready,Invoke-Verify,Invoke-Apply
