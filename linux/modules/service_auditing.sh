@@ -3,31 +3,49 @@
 # Linux Service Auditing Module for CyberPatriot
 #
 # This script:
-# 1. Installs and enables essential security services (hardcoded)
-# 2. Disables/stops risky services (hardcoded)
-# 3. Uses AI to analyze remaining services dynamically with README context
-# 4. Executes AI recommendations for stopping/disabling services
+# 1. Reads parsed README data (critical services) from shared data directory
+# 2. Installs and enables essential security services (hardcoded)
+# 3. Disables/stops known risky services (hardcoded, excluding web/FTP which are dynamic)
+# 4. Uses AI to analyze remaining services with critical services context
+# 5. Executes AI recommendations for stopping/disabling services
 #
 # Requirements:
-#   - OPENROUTER_API_KEY environment variable
-#   - Optional: OPENROUTER_MODEL (defaults to openai/gpt-4o-mini)
+#   - config.conf with OPENROUTER_API_KEY set
 #   - Root/sudo privileges
-#   - README file at standard CyberPatriot locations
+#   - Parsed README data (from readme_parser.sh)
 
 set -euo pipefail
 
-# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LINUX_DIR="$(dirname "$SCRIPT_DIR")"
+CONFIG_FILE="$LINUX_DIR/config.conf"
+
+# Source config
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Error: Config file not found at $CONFIG_FILE" >&2
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# Validate required config
+if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "Error: OPENROUTER_API_KEY not set in $CONFIG_FILE" >&2
+    exit 1
+fi
+
 OPENROUTER_ENDPOINT="https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL="${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
+DATA_DIR="${DATA_DIR:-/tmp/cp-linux-automation}"
 MAX_SERVICES=200
 LOG_PREFIX="[ServiceAudit]"
 
-# Color codes for output
+# Color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # Logging functions
 log_info() {
@@ -50,14 +68,6 @@ log_error() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root"
-        exit 1
-    fi
-}
-
-# Check for required environment variables
-check_env() {
-    if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-        log_error "OPENROUTER_API_KEY environment variable not set"
         exit 1
     fi
 }
@@ -172,7 +182,7 @@ service_exists() {
     esac
 }
 
-# Install essential security packages (no apt update per requirements)
+# Install essential security packages
 install_security_packages() {
     log_info "Installing essential security packages..."
 
@@ -195,7 +205,6 @@ install_security_packages() {
 
     if [[ ${#packages[@]} -gt 0 ]]; then
         log_info "Installing: ${packages[*]}"
-        # Use DEBIAN_FRONTEND=noninteractive to avoid prompts
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}" 2>/dev/null || log_warn "Some packages failed to install"
     else
         log_ok "All essential security packages already installed"
@@ -217,6 +226,7 @@ apply_hardcoded_rules() {
     )
 
     # Services to ALWAYS disable and stop (security risks)
+    # NOTE: Web servers (apache2, nginx) and FTP (vsftpd, ftpd) are handled dynamically by AI
     local disable_services=(
         "cups"              # Printing service
         "cups-browsed"      # Printer discovery
@@ -225,10 +235,6 @@ apply_hardcoded_rules() {
         "deluged"           # BitTorrent daemon
         "rtorrent"          # BitTorrent client
         "qbittorrent"       # BitTorrent client
-        "apache2"           # Web server (unless needed per README)
-        "nginx"             # Web server (unless needed per README)
-        "vsftpd"            # FTP server
-        "ftpd"              # FTP server
         "telnetd"           # Telnet server
         "rsh-server"        # RSH server
         "rlogin"            # Remote login
@@ -273,7 +279,6 @@ get_service_inventory() {
                 awk '{print $1 "," $2 "," $3 "," $4}' | head -n "$MAX_SERVICES")
             ;;
         sysvinit)
-            # For sysvinit, use service --status-all
             output=$(service --status-all 2>&1 | \
                 awk '{status="unknown"; if ($2 == "+") status="running"; else if ($2 == "-") status="stopped"; print $3 "," status ",unknown,unknown"}' | \
                 head -n "$MAX_SERVICES")
@@ -283,58 +288,46 @@ get_service_inventory() {
     echo "$output"
 }
 
-# Find README file
-find_readme() {
-    local readme_locations=(
-        "/home/*/Desktop/README.html"
-        "/home/*/Desktop/README.txt"
-        "/home/*/Desktop/Readme.html"
-        "/home/*/Desktop/readme.html"
-        "/root/Desktop/README.html"
-        "/root/Desktop/README.txt"
-        "/opt/cyberpatriot/README.html"
-        "/opt/cyberpatriot/README.txt"
-    )
+# Load parsed README data
+load_parsed_readme() {
+    local parsed_file="$DATA_DIR/parsed_readme.json"
 
-    for location in "${readme_locations[@]}"; do
-        # Use globbing to expand wildcards
-        for file in $location; do
-            if [[ -f "$file" ]]; then
-                echo "$file"
-                return 0
-            fi
-        done
-    done
-
-    return 1
-}
-
-# Extract text from README
-extract_readme_text() {
-    local readme_file="$1"
-    local text=""
-
-    if [[ "$readme_file" == *.html ]]; then
-        # Strip HTML tags if it's an HTML file
-        text=$(cat "$readme_file" | sed 's/<[^>]*>//g' | tr -s '[:space:]' ' ')
-    else
-        text=$(cat "$readme_file")
+    if [[ ! -f "$parsed_file" ]]; then
+        log_warn "Parsed README not found at $parsed_file"
+        log_warn "Run readme_parser.sh first, or it will be auto-run by run.sh"
+        echo "{}"
+        return 1
     fi
 
-    # Limit to 6000 characters to avoid token limits
-    echo "${text:0:6000}"
+    cat "$parsed_file"
 }
 
 # Build system prompt for OpenRouter
 build_system_prompt() {
-    cat <<'EOF'
-You are an assistant that analyzes Linux services for CyberPatriot competition images.
-Your task is to identify which services should be STOPPED and DISABLED based on security best practices and the README instructions.
+    local critical_services="$1"
 
-Analyze the service inventory and README content to determine:
-1. Services that are security risks and should be disabled (e.g., unnecessary network services, file sharing, remote access)
-2. Services explicitly mentioned in the README as needing to be stopped or disabled
-3. Services that are explicitly mentioned as CRITICAL or REQUIRED in the README should NOT be disabled
+    cat <<EOF
+You are an assistant that analyzes Linux services for CyberPatriot competition images.
+Your task is to identify which services should be STOPPED and DISABLED based on security best practices.
+
+CRITICAL: The following services are explicitly marked as REQUIRED in the README and must NEVER be disabled:
+$critical_services
+
+Analyze the service inventory to determine which services are security risks and should be disabled.
+
+Consider disabling:
+- Web servers (apache2, nginx) UNLESS they are in the critical services list
+- FTP servers (vsftpd, proftpd, ftpd) UNLESS they are in the critical services list
+- Samba/SMB file sharing (smbd, nmbd) UNLESS they are in the critical services list
+- VNC/remote desktop (vino, x11vnc) UNLESS they are in the critical services list
+- Telnet (telnetd)
+- Unnecessary database servers (mysql, postgresql) UNLESS they are in the critical services list
+- Mail servers (postfix, sendmail, exim) UNLESS they are in the critical services list
+
+DO NOT disable:
+- Essential system services (sshd, cron, systemd services, dbus, etc.)
+- Any service in the critical services list above
+- Security services (apparmor, auditd, ufw, fail2ban, etc.)
 
 Return ONLY a JSON object with this exact structure:
 {
@@ -343,40 +336,38 @@ Return ONLY a JSON object with this exact structure:
 
 Rules:
 - Only include services that appear in the provided inventory
-- Use the exact service name from the inventory (e.g., "apache2.service" not just "apache2")
-- DO NOT disable essential system services (sshd, cron, systemd services, dbus, etc.)
-- DO NOT disable services that the README explicitly states are required or critical
-- Focus on security risks: web servers, FTP, Telnet, unnecessary network services, file sharing, remote desktop, etc.
+- Use the exact service name from the inventory (e.g., "apache2.service" if that's what's shown)
+- NEVER include services from the critical services list
 - Be conservative: when in doubt, do not disable
 - Return valid JSON only, no markdown, no explanations
-
-Examples of services that are typically safe to disable (if not in README as critical):
-- Web servers (apache2, nginx) unless README mentions web hosting
-- FTP servers (vsftpd, proftpd)
-- Samba/SMB file sharing (smbd, nmbd) unless README mentions file sharing
-- VNC/remote desktop (vino, x11vnc) unless README mentions remote access
-- Telnet (telnetd)
-- Unnecessary print services (cups) if already handled
 EOF
 }
 
 # Call OpenRouter API for dynamic service analysis
 analyze_services_with_ai() {
     local inventory="$1"
-    local readme_text="$2"
+    local critical_services_json="$2"
+
+    # Format critical services for the prompt
+    local critical_services_list
+    if [[ "$critical_services_json" == "[]" ]] || [[ -z "$critical_services_json" ]]; then
+        critical_services_list="(none specified in README)"
+    else
+        critical_services_list=$(echo "$critical_services_json" | jq -r '.[] | "- " + .' | tr '\n' ' ')
+    fi
 
     local system_prompt
-    system_prompt=$(build_system_prompt)
+    system_prompt=$(build_system_prompt "$critical_services_list")
 
     local user_prompt
     user_prompt=$(cat <<EOF
-README CONTENT:
-$readme_text
+CRITICAL SERVICES (must NOT be disabled):
+$critical_services_list
 
 SERVICE INVENTORY:
 $inventory
 
-Analyze the above and return JSON with services to disable.
+Analyze the above and return JSON with services to disable. Remember: NEVER disable critical services!
 EOF
 )
 
@@ -416,7 +407,7 @@ EOF
     fi
 
     # Strip markdown code fences if present
-    content=$(echo "$content" | sed 's/^```json//g' | sed 's/^```//g' | sed 's/```$//g')
+    content=$(echo "$content" | sed 's/^```json//g' | sed 's/^```//g' | sed 's/```$//g' | xargs)
 
     echo "$content"
 }
@@ -425,6 +416,7 @@ EOF
 apply_ai_recommendations() {
     local recommendations="$1"
     local init_system="$2"
+    local critical_services_json="$3"
 
     local changes=0
 
@@ -437,10 +429,32 @@ apply_ai_recommendations() {
         return 0
     fi
 
+    # Build list of critical service names for checking
+    local critical_services_list=()
+    if [[ "$critical_services_json" != "[]" ]] && [[ -n "$critical_services_json" ]]; then
+        while IFS= read -r svc; do
+            critical_services_list+=("$svc")
+        done < <(echo "$critical_services_json" | jq -r '.[]')
+    fi
+
     while IFS= read -r service; do
         if [[ -n "$service" ]]; then
             # Remove .service suffix if present for service commands
             local service_name="${service%.service}"
+
+            # Check if this service is in critical services list
+            local is_critical=false
+            for critical_svc in "${critical_services_list[@]}"; do
+                if [[ "$service_name" == "$critical_svc" ]] || [[ "$service" == "$critical_svc" ]]; then
+                    is_critical=true
+                    break
+                fi
+            done
+
+            if $is_critical; then
+                log_warn "Skipping $service_name - marked as critical in README"
+                continue
+            fi
 
             if service_exists "$service_name" "$init_system"; then
                 service_stop "$service_name" "$init_system"
@@ -462,7 +476,6 @@ main() {
 
     # Pre-flight checks
     check_root
-    check_env
 
     local init_system
     init_system=$(detect_init_system)
@@ -479,6 +492,33 @@ main() {
     # Apply hardcoded rules
     apply_hardcoded_rules "$init_system"
 
+    # Load parsed README data
+    log_info "Loading parsed README data..."
+    local parsed_readme
+    if parsed_readme=$(load_parsed_readme); then
+        log_ok "Loaded parsed README data"
+    else
+        log_warn "No parsed README data available, skipping AI analysis"
+        log_ok "Service auditing completed (hardcoded rules only)"
+        exit 0
+    fi
+
+    # Extract critical services
+    local critical_services
+    critical_services=$(echo "$parsed_readme" | jq -c '.critical_services // []')
+
+    local service_count
+    service_count=$(echo "$critical_services" | jq 'length')
+
+    if [[ $service_count -gt 0 ]]; then
+        local services_list
+        services_list=$(echo "$critical_services" | jq -r '.[] | "  - " + .')
+        log_info "Critical services from README ($service_count):"
+        echo "$services_list"
+    else
+        log_info "No critical services specified in README"
+    fi
+
     # Get service inventory
     log_info "Gathering service inventory..."
     local inventory
@@ -492,30 +532,15 @@ main() {
 
     log_info "Found $(echo "$inventory" | wc -l) services"
 
-    # Find and read README
-    log_info "Looking for README file..."
-    local readme_file
-    if readme_file=$(find_readme); then
-        log_ok "Found README: $readme_file"
+    # AI analysis
+    log_info "Sending service inventory and critical services to AI for analysis..."
 
-        local readme_text
-        readme_text=$(extract_readme_text "$readme_file")
-
-        if [[ -n "$readme_text" ]]; then
-            log_info "Sending service inventory and README to AI for analysis..."
-
-            local ai_response
-            if ai_response=$(analyze_services_with_ai "$inventory" "$readme_text"); then
-                log_info "AI analysis complete, applying recommendations..."
-                apply_ai_recommendations "$ai_response" "$init_system"
-            else
-                log_warn "AI analysis failed, skipping dynamic recommendations"
-            fi
-        else
-            log_warn "README is empty, skipping AI analysis"
-        fi
+    local ai_response
+    if ai_response=$(analyze_services_with_ai "$inventory" "$critical_services"); then
+        log_info "AI analysis complete, applying recommendations..."
+        apply_ai_recommendations "$ai_response" "$init_system" "$critical_services"
     else
-        log_warn "No README found, skipping AI analysis"
+        log_warn "AI analysis failed, skipping dynamic recommendations"
     fi
 
     log_ok "Service auditing completed successfully"

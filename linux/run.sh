@@ -3,12 +3,13 @@
 # Linux CyberPatriot Automation Launcher
 #
 # This script runs all Linux hardening modules in sequence.
-# Currently only includes service auditing, but can be extended.
+# Modules: README Parser, Service Auditing (extensible)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SCRIPT_DIR/modules"
+CONFIG_FILE="$SCRIPT_DIR/config.conf"
 
 # Color codes
 RED='\033[0;31m'
@@ -46,12 +47,23 @@ check_root() {
 }
 
 check_env() {
-    if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-        log_error "OPENROUTER_API_KEY environment variable not set"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_error "Config file not found at $CONFIG_FILE"
         echo ""
-        echo "Set it with:"
-        echo "  export OPENROUTER_API_KEY=\"sk-or-v1-...\""
-        echo "  sudo -E $0"
+        echo "Create it with:"
+        echo "  cp $CONFIG_FILE.example $CONFIG_FILE"
+        echo "  # Edit and add your OPENROUTER_API_KEY"
+        exit 1
+    fi
+
+    # Source config to check API key
+    source "$CONFIG_FILE"
+
+    if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+        log_error "OPENROUTER_API_KEY not set in $CONFIG_FILE"
+        echo ""
+        echo "Edit $CONFIG_FILE and set:"
+        echo "  OPENROUTER_API_KEY=\"sk-or-v1-...\""
         exit 1
     fi
 }
@@ -65,6 +77,24 @@ main() {
     check_env
 
     log_ok "Pre-flight checks passed"
+    echo ""
+
+    # Module 0: README Parser (must run first)
+    if [[ -x "$MODULES_DIR/readme_parser.sh" ]]; then
+        log_info "Running README Parser Module..."
+        echo ""
+
+        if "$MODULES_DIR/readme_parser.sh"; then
+            log_ok "README Parser Module completed"
+        else
+            log_error "README Parser Module failed"
+            exit 1
+        fi
+    else
+        log_error "README Parser Module not found or not executable"
+        exit 1
+    fi
+
     echo ""
 
     # Module 1: Service Auditing
