@@ -11,6 +11,8 @@ Automated, modular hardening for **Ubuntu/Debian** Linux images used in CyberPat
 - **Applies hardcoded service rules** for known security risks
 - **Uses AI to analyze services dynamically** with critical services context from README
 - **Stops and disables risky services** automatically (except those marked as critical)
+- **Hardens SSH configuration** with strong ciphers, key-only auth, and firewall rules
+- **Performs OS updates** to patch security vulnerabilities
 
 ---
 
@@ -31,7 +33,16 @@ Automated, modular hardening for **Ubuntu/Debian** Linux images used in CyberPat
    ↓ AI returns services to disable (respecting critical services)
    ↓ Applies AI recommendations
 
-3. [Future modules can read parsed_readme.json]
+3. SSH Hardening (ssh_hardening.sh)
+   ↓ Creates hardened SSH configuration
+   ↓ Enforces strong ciphers and key-only authentication
+   ↓ Fixes file permissions
+   ↓ Configures UFW firewall
+
+4. OS Updates (os_updates.sh)
+   ↓ Updates package lists
+   ↓ Configures automatic security updates
+   ↓ Performs full system upgrade
 ```
 
 ### Shared Configuration
@@ -105,6 +116,85 @@ The `critical_services` array is extracted by AI from statements like:
 
 ---
 
+## SSH Hardening Module
+
+The SSH hardening module secures OpenSSH server configuration for Ubuntu 24.04 and Linux Mint 21:
+
+### Security Features Applied
+
+**Authentication Hardening:**
+- Disables root login (`PermitRootLogin no`)
+- Disables password authentication (key-only access)
+- Disables empty passwords
+- Limits authentication attempts to 3 tries
+- Public key authentication only
+
+**Network Hardening:**
+- Configurable SSH port (default: 22)
+- Disables X11 forwarding
+- Disables TCP forwarding
+- Disables agent forwarding
+- Configures UFW firewall rules automatically
+
+**Cryptographic Hardening:**
+- Strong ciphers only: `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, `aes256-ctr`
+- Strong MACs: `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`
+- Strong key exchange: `curve25519-sha256`, `diffie-hellman-group-exchange-sha256`
+- Removes weak Diffie-Hellman groups (<3071 bits) from moduli
+
+**File Permissions:**
+- Ensures `/etc/ssh/` is owned by root with correct permissions
+- SSH config files: 0644
+- SSH host private keys: 0600
+- SSH host public keys: 0644
+- User `~/.ssh/` directory: 0700
+- User `authorized_keys`: 0600
+
+**Other Settings:**
+- Security banner at `/etc/issue.net`
+- Verbose logging for security audits
+- Connection timeout after 300 seconds of inactivity
+- Maximum 2 concurrent sessions per user
+
+### Configuration
+
+The module uses embedded configuration at the top of the script:
+
+```bash
+SSH_PORT="22"                      # SSH port number
+KEEP_PORT_22_OPEN="yes"            # Keep port 22 in UFW ("yes" or "no")
+ENABLE_UFW="yes"                   # Configure UFW firewall ("yes" or "no")
+HARDEN_MODULI="yes"                # Remove weak DH groups ("yes" or "no")
+ALLOW_USERS=""                     # Restrict to specific users (empty = all)
+```
+
+### Validation
+
+The module:
+1. Validates configuration with `sshd -t` before applying
+2. Displays effective configuration after changes
+3. Reloads SSH service gracefully (maintains existing connections)
+4. Shows comprehensive summary of applied settings
+
+---
+
+## OS Updates Module
+
+The OS updates module ensures the system has the latest security patches:
+
+### Features
+
+- Updates all package lists from repositories
+- Installs and configures `unattended-upgrades` for automatic security updates
+- Enables automatic update timers
+- Performs full system upgrade (including kernel updates)
+- Removes unnecessary packages with autoremove
+- Detects kernel updates and warns about reboot requirement
+
+**Note:** The module does NOT automatically reboot after kernel upgrades. Manual reboot is required if a kernel is updated.
+
+---
+
 ## Requirements
 
 - **Root/sudo privileges**
@@ -136,6 +226,8 @@ sudo ./linux/run.sh
 # Or run individual modules:
 sudo ./linux/modules/readme_parser.sh
 sudo ./linux/modules/service_auditing.sh
+sudo ./linux/modules/ssh_hardening.sh
+sudo ./linux/modules/os_updates.sh
 ```
 
 **Note:** No need for `sudo -E` anymore - the API key is read from config.conf!
@@ -194,9 +286,15 @@ sudo ./linux/modules/service_auditing.sh
 
 ## Supported Distributions
 
-- Ubuntu 14.04+ (Trusty, Xenial, Bionic, Focal, Jammy)
+**All modules:**
+- Ubuntu 14.04+ (Trusty, Xenial, Bionic, Focal, Jammy, Noble)
 - Debian 8+ (Jessie, Stretch, Buster, Bullseye)
 - Linux Mint 17+
+
+**SSH Hardening module:**
+- Ubuntu 24.04 (Noble Numbat)
+- Linux Mint 21 (Vanessa, Vera, Victoria, Virginia)
+- May work on other recent versions but primarily tested on these
 
 Both **systemd** and **sysvinit/upstart** init systems are supported.
 
