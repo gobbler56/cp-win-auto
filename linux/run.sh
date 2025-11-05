@@ -3,7 +3,7 @@
 # Linux CyberPatriot Automation Launcher
 #
 # This script runs all Linux hardening modules in sequence.
-# Modules: README Parser, Service Auditing (extensible)
+# Modules: README Parser, Service Auditing, OS Updates
 
 set -euo pipefail
 
@@ -110,6 +110,24 @@ main() {
         fi
     else
         log_error "Service Auditing Module not found or not executable"
+        exit 1
+    fi
+
+    echo ""
+
+    # Module 2: OS Updates
+    if [[ -x "$MODULES_DIR/os_updates.sh" ]]; then
+        log_info "Running OS Updates Module..."
+        echo ""
+
+        if "$MODULES_DIR/os_updates.sh"; then
+            log_ok "OS Updates Module completed"
+        else
+            log_error "OS Updates Module failed"
+            exit 1
+        fi
+    else
+        log_error "OS Updates Module not found or not executable"
         exit 1
     fi
 
