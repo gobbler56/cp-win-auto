@@ -287,6 +287,20 @@ function Ensure-AutoplayDisabled {
   return $changed
 }
 
+function Test-AutoplayDisabled {
+  $paths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers'
+  )
+
+  foreach ($path in $paths) {
+    $value = Get-RegistryValueSafe -Path $path -Name 'DisableAutoplay'
+    if ($value -ne 1) { return $false }
+  }
+
+  return $true
+}
+
 # ---- Settings: ASLR / Memory mitigations ------------------------------------
 
 function Ensure-MemoryMitigations {
@@ -338,6 +352,117 @@ function Ensure-IpSourceRoutingDisabled {
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   return $changed
+}
+
+# ---- System integrity / crash handling --------------------------------------
+
+function Ensure-CoreDumpsDisabled {
+  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name 'CrashDumpEnabled' -Type 'DWord' -Value 0)
+}
+
+function Test-CoreDumpsDisabled {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name 'CrashDumpEnabled'
+  return ($value -eq 0)
+}
+
+function Ensure-FipsAlgorithmsEnabled {
+  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy' -Name 'Enabled' -Type 'DWord' -Value 1)
+}
+
+function Test-FipsAlgorithmsEnabled {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy' -Name 'Enabled'
+  return ($value -eq 1)
+}
+
+# ---- Virtualization-based security -----------------------------------------
+
+function Ensure-VbsMandatoryMode {
+  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' -Name 'Mandatory' -Type 'DWord' -Value 1)
+}
+
+function Test-VbsMandatoryMode {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' -Name 'Mandatory'
+  return ($value -eq 1)
+}
+
+function Ensure-MachineIdentityIsolation {
+  return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard' -Name 'MachineIdentityIsolation' -Type 'DWord' -Value 2)
+}
+
+function Test-MachineIdentityIsolation {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard' -Name 'MachineIdentityIsolation'
+  return ($value -eq 1 -or $value -eq 2)
+}
+
+# ---- Devices / peripherals --------------------------------------------------
+
+function Ensure-PrinterDriverRestriction {
+  return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint' -Name 'RestrictDriverInstallationToAdministrators' -Type 'DWord' -Value 1)
+}
+
+function Test-PrinterDriverRestriction {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint' -Name 'RestrictDriverInstallationToAdministrators'
+  return ($value -eq 1)
+}
+
+# ---- Notifications / Store / lock screen -----------------------------------
+
+function Ensure-LockScreenNotificationsDisabled {
+  $paths = @(
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications',
+    'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'
+  )
+
+  $changed = $false
+  foreach ($path in $paths) {
+    $changed = (Ensure-RegistryValue -Path $path -Name 'NoToastApplicationNotificationOnLockScreen' -Type 'DWord' -Value 1) -or $changed
+    $changed = (Ensure-RegistryValue -Path $path -Name 'LockScreenToastEnabled' -Type 'DWord' -Value 0) -or $changed
+  }
+
+  return $changed
+}
+
+function Test-LockScreenNotificationsDisabled {
+  $paths = @(
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications',
+    'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'
+  )
+
+  foreach ($path in $paths) {
+    $lockScreenOff = (Get-RegistryValueSafe -Path $path -Name 'NoToastApplicationNotificationOnLockScreen')
+    $toastDisabled = (Get-RegistryValueSafe -Path $path -Name 'LockScreenToastEnabled')
+    if ($lockScreenOff -ne 1 -or $toastDisabled -ne 0) { return $false }
+  }
+
+  return $true
+}
+
+function Ensure-WindowsStoreDisabled {
+  return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name 'RemoveWindowsStore' -Type 'DWord' -Value 1)
+}
+
+function Test-WindowsStoreDisabled {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name 'RemoveWindowsStore'
+  return ($value -eq 1)
+}
+
+# ---- Boot security ----------------------------------------------------------
+
+function Ensure-SecureBootEnabled {
+  if (Test-SecureBootEnabled) { return $false }
+  Write-Warn 'UEFI Secure Boot is not enabled; enable it in firmware settings.'
+  return $false
+}
+
+function Test-SecureBootEnabled {
+  try {
+    if (Get-Command Confirm-SecureBootUEFI -ErrorAction SilentlyContinue) {
+      return [bool](Confirm-SecureBootUEFI -ErrorAction Stop)
+    }
+  } catch {}
+
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' -Name 'UEFISecureBootEnabled'
+  return ($value -eq 1)
 }
 
 # ---- Filesystem ACL hardening -----------------------------------------------
@@ -392,6 +517,77 @@ function Ensure-DirectoryRestrictions {
   if (Test-Path 'C:\inetpub')     { if (Remove-IdentityWriteAccess -Path 'C:\inetpub'     -Identity 'Everyone')     { $changed = $true } }
   if (Test-Path 'C:\Windows\NTDS'){ if (Remove-IdentityWriteAccess -Path 'C:\Windows\NTDS'-Identity 'Domain Users'){ $changed = $true } }
   return $changed
+}
+
+function Test-IdentityWriteAccess {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$Identity
+  )
+
+  try {
+    $acl = Get-Acl -Path $Path -ErrorAction Stop
+    $ntAccount = New-Object System.Security.Principal.NTAccount($Identity)
+    $target = $ntAccount.Value
+  } catch {
+    return $false
+  }
+
+  foreach ($rule in @($acl.Access)) {
+    $match = [string]::Equals($rule.IdentityReference.Value, $target, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $match) { continue }
+    if (($rule.FileSystemRights -band $script:WriteRightsMask) -eq 0) { continue }
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+    return $true
+  }
+
+  return $false
+}
+
+function Ensure-HomeDirectoryIsolation {
+  $basePath = 'C:\Users'
+  if (-not (Test-Path $basePath)) { return $false }
+
+  $exempt = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($name in @('Public','Default','Default User','All Users')) { [void]$exempt.Add($name) }
+
+  $changed = $false
+  try {
+    $userDirs = Get-ChildItem -Path $basePath -Directory -ErrorAction Stop
+  } catch {
+    Write-Warn ("Failed to enumerate user directories: {0}" -f $_.Exception.Message)
+    return $false
+  }
+
+  foreach ($dir in $userDirs) {
+    if ($exempt.Contains($dir.Name)) { continue }
+    $changed = (Remove-IdentityWriteAccess -Path $dir.FullName -Identity 'Users') -or $changed
+    $changed = (Remove-IdentityWriteAccess -Path $dir.FullName -Identity 'Authenticated Users') -or $changed
+  }
+
+  return $changed
+}
+
+function Test-HomeDirectoryIsolation {
+  $basePath = 'C:\Users'
+  if (-not (Test-Path $basePath)) { return $true }
+
+  $exempt = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($name in @('Public','Default','Default User','All Users')) { [void]$exempt.Add($name) }
+
+  try {
+    $userDirs = Get-ChildItem -Path $basePath -Directory -ErrorAction Stop
+  } catch {
+    return $false
+  }
+
+  foreach ($dir in $userDirs) {
+    if ($exempt.Contains($dir.Name)) { continue }
+    if (Test-IdentityWriteAccess -Path $dir.FullName -Identity 'Users') { return $false }
+    if (Test-IdentityWriteAccess -Path $dir.FullName -Identity 'Authenticated Users') { return $false }
+  }
+
+  return $true
 }
 
 # ---- SMB share auditing/removal (with AI allowlist from README) --------------
@@ -673,13 +869,22 @@ function Apply-AllSettings {
   if (Ensure-ScreenSaverPolicy)     { $changes += 'Enforced secure screen saver' }
   if (Ensure-AutorunDisabled)       { $changes += 'Disabled AutoRun' }
   if (Ensure-AutoplayDisabled)      { $changes += 'Disabled AutoPlay' }
+  if (Ensure-CoreDumpsDisabled)     { $changes += 'Disabled crash dumps' }
   if (Ensure-MemoryMitigations)     { $changes += 'Enabled ASLR mitigations' }
   if (Ensure-EarlyLaunchPolicy)     { $changes += 'Restricted ELAM driver loading' }
   if (Ensure-ValidateHeapIntegrity) { $changes += 'Enabled heap integrity validation' }
   if (Ensure-HeapMitigationOptions) { $changes += 'Updated mitigation options' }
   if (Ensure-IpSourceRoutingDisabled){ $changes += 'Disabled IP source routing' }
+  if (Ensure-VbsMandatoryMode)      { $changes += 'Enabled VBS mandatory mode' }
+  if (Ensure-MachineIdentityIsolation) { $changes += 'Enforced Machine Identity Isolation' }
   if (Ensure-DirectoryRestrictions) { $changes += 'Hardened directory ACLs' }
+  if (Ensure-HomeDirectoryIsolation){ $changes += 'Isolated user home directories' }
   if (Ensure-ShareRestrictions)     { $changes += 'Updated share restrictions' }
+  if (Ensure-PrinterDriverRestriction) { $changes += 'Limited printer driver installs to admins' }
+  if (Ensure-LockScreenNotificationsDisabled) { $changes += 'Disabled lock screen notifications' }
+  if (Ensure-WindowsStoreDisabled)  { $changes += 'Disabled Windows Store access' }
+  if (Ensure-FipsAlgorithmsEnabled) { $changes += 'Enforced FIPS algorithms' }
+  if (Ensure-SecureBootEnabled)     { $changes += 'Checked Secure Boot requirement' }
 
   if ($script:LastRemovedShares.Count -gt 0) {
     $changes += ("Removed non-default shares: {0}" -f ($script:LastRemovedShares -join ', '))
@@ -717,12 +922,21 @@ function Invoke-Verify {
   $checks += "UACEnum=$(if (Test-UacAdministratorEnumeration) { 'Disabled' } else { 'NeedsAttention' })"
   $checks += "Screensaver=$(if (Test-ScreenSaverPolicy) { 'Enforced' } else { 'NeedsAttention' })"
   $checks += "AutoRun=$(if ((Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'NoDriveTypeAutoRun') -eq 255) { 'Disabled' } else { 'NeedsAttention' })"
-  $checks += "AutoPlay=$(if ((Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers' -Name 'DisableAutoplay') -eq 1) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "AutoPlay=$(if (Test-AutoplayDisabled) { 'Disabled' } else { 'NeedsAttention' })"
   $checks += "ASLR=$(if (Test-MemoryMitigations) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "ELAM=$(if (Test-EarlyLaunchPolicy) { 'Strict' } else { 'NeedsAttention' })"
   $checks += "HeapIntegrity=$(if (Test-ValidateHeapIntegrity) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "IPSourceRouting=$(if ((Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'DisableIPSourceRouting') -eq 2) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "CrashDumps=$(if (Test-CoreDumpsDisabled) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "VBSMandatory=$(if (Test-VbsMandatoryMode) { 'Enabled' } else { 'NeedsAttention' })"
+  $checks += "MachineIdentityIsolation=$(if (Test-MachineIdentityIsolation) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "Shares=$(if (Test-UnauthorizedShares) { 'Clean' } else { 'NeedsReview' })"
+  $checks += "HomeDirs=$(if (Test-HomeDirectoryIsolation) { 'Isolated' } else { 'NeedsAttention' })"
+  $checks += "PrinterDrivers=$(if (Test-PrinterDriverRestriction) { 'AdminOnly' } else { 'NeedsAttention' })"
+  $checks += "LockScreenNotifications=$(if (Test-LockScreenNotificationsDisabled) { 'Hidden' } else { 'NeedsAttention' })"
+  $checks += "WindowsStore=$(if (Test-WindowsStoreDisabled) { 'Prohibited' } else { 'NeedsAttention' })"
+  $checks += "SecureBoot=$(if (Test-SecureBootEnabled) { 'Enabled' } else { 'NeedsAttention' })"
+  $checks += "FIPS=$(if (Test-FipsAlgorithmsEnabled) { 'Enabled' } else { 'NeedsAttention' })"
 
   $status = if ($checks -match 'Needs') { 'NeedsAttention' } else { 'Succeeded' }
   return New-ModuleResult -Name $script:ModuleName -Status $status -Message ($checks -join '; ')
