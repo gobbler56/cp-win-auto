@@ -111,6 +111,38 @@ function Invoke-ConfigureASRRules {
   }
 }
 
+function Invoke-EnsureDefenderActive {
+  Write-Info 'Ensuring Microsoft Defender is active and not in passive mode'
+
+  $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+  try {
+    if (-not (Test-Path $policyPath)) {
+      New-Item -Path $policyPath -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $policyPath -Name 'ForceDefenderPassiveMode' -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $policyPath -Name 'DisableAntiSpyware' -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $policyPath -Name 'DisableRealtimeMonitoring' -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
+    Write-Info 'Defender policy registry keys set to keep protection active'
+  } catch {
+    Write-Warn ("Failed to enforce Defender active policy: {0}" -f $_.Exception.Message)
+  }
+
+  try {
+    Set-MpPreference `
+      -DisableRealtimeMonitoring $false `
+      -DisableBehaviorMonitoring $false `
+      -DisableIOAVProtection $false `
+      -DisableArchiveScanning $false `
+      -DisableScriptScanning $false `
+      -DisableIntrusionPreventionSystem $false `
+      -ErrorAction Stop
+    Write-Info 'Defender realtime, behavior, IOAV, archive, script, and IPS protections enabled'
+  } catch {
+    Write-Warn ("Failed to enable Defender protections via Set-MpPreference: {0}" -f $_.Exception.Message)
+  }
+}
+
 function Invoke-HardenDefender {
   Write-Info 'Hardening Windows Defender protections'
 
@@ -137,6 +169,62 @@ function Invoke-HardenDefender {
     }
   } catch {
     Write-Warn ("Failed to configure Defender preferences: {0}" -f $_.Exception.Message)
+  }
+}
+
+function Invoke-ConfigureFirewallDefaults {
+  Write-Info 'Ensuring firewall profiles are enabled and configured for strict inbound blocking'
+
+  $commands = @(
+    @('advfirewall', 'set', 'allprofiles', 'state', 'on'),
+    @('advfirewall', 'set', 'publicprofile', 'firewallpolicy', 'blockinbound,allowoutbound'),
+    @('advfirewall', 'set', 'privateprofile', 'firewallpolicy', 'blockinbound,allowoutbound'),
+    @('advfirewall', 'set', 'domainprofile', 'firewallpolicy', 'blockinbound,allowoutbound'),
+    @('advfirewall', 'set', 'allprofiles', 'logging', 'filename', '%systemroot%\System32\LogFiles\Firewall\pfirewall.log'),
+    @('advfirewall', 'set', 'allprofiles', 'logging', 'maxsize', '32767'),
+    @('advfirewall', 'set', 'allprofiles', 'logging', 'allowedconnections', 'enable'),
+    @('advfirewall', 'set', 'allprofiles', 'logging', 'droppedconnections', 'enable')
+  )
+
+  foreach ($args in $commands) {
+    try {
+      $proc = Start-Process -FilePath 'netsh.exe' -ArgumentList $args -Wait -PassThru -NoNewWindow
+      if ($proc.ExitCode -ne 0) {
+        Write-Warn ("netsh {0} failed with exit code {1}" -f ($args -join ' '), $proc.ExitCode)
+      }
+    } catch {
+      Write-Warn ("Failed to execute netsh {0}: {1}" -f ($args -join ' '), $_.Exception.Message)
+    }
+  }
+}
+
+function Invoke-RemoveNonDefaultAmsiProviders {
+  Write-Info 'Checking for non-default AMSI providers'
+
+  $providerRoot = 'HKLM:\SOFTWARE\Microsoft\AMSI\Providers'
+  $defaultProvider = '{2781761E-28E0-4109-99FE-B9D127C57AFE}'
+
+  if (-not (Test-Path $providerRoot)) {
+    Write-Info 'No AMSI providers registered'
+    return
+  }
+
+  try {
+    $providers = Get-ChildItem -Path $providerRoot -ErrorAction Stop
+    foreach ($provider in $providers) {
+      if ($provider.PSChildName -ieq $defaultProvider) {
+        continue
+      }
+
+      Write-Info ("Removing non-default AMSI provider {0}" -f $provider.PSChildName)
+      try {
+        Remove-Item -Path $provider.PSPath -Recurse -Force -ErrorAction Stop
+      } catch {
+        Write-Warn ("Failed to remove AMSI provider {0}: {1}" -f $provider.PSChildName, $_.Exception.Message)
+      }
+    }
+  } catch {
+    Write-Warn ("Failed to enumerate AMSI providers: {0}" -f $_.Exception.Message)
   }
 }
 
@@ -226,6 +314,28 @@ function Invoke-Verify {
     $allPassed = $false
   }
 
+  # Check Defender active/passive mode and realtime protection
+  try {
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+    $forcePassive = $null
+    $disableRealtime = $null
+    if (Test-Path $policyPath) {
+      $policy = Get-ItemProperty -Path $policyPath -ErrorAction SilentlyContinue
+      $forcePassive = $policy.ForceDefenderPassiveMode
+      $disableRealtime = $policy.DisableRealtimeMonitoring
+    }
+
+    if (($forcePassive -eq 0 -or -not $forcePassive) -and ($disableRealtime -eq 0 -or -not $disableRealtime) -and $mpPref.DisableRealtimeMonitoring -eq $false) {
+      $checks += 'Defender active mode enforced'
+    } else {
+      $checks += 'Defender active mode not enforced'
+      $allPassed = $false
+    }
+  } catch {
+    $checks += 'Defender active mode check failed'
+    $allPassed = $false
+  }
+
   # Check if ASR rules are configured
   try {
     $asrRegPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules'
@@ -275,6 +385,55 @@ function Invoke-Verify {
     $allPassed = $false
   }
 
+  # Check firewall defaults and logging
+  try {
+    $output = & netsh advfirewall show publicprofile 2>$null
+    $publicInboundBlock = $false
+    if ($output) {
+      $publicInboundBlock = ($output -match '(?im)^\s*Firewall Policy\s*BlockInbound,AllowOutbound')
+    }
+
+    $logOutput = & netsh advfirewall show allprofiles 2>$null
+    $loggingEnabled = $false
+    $logSizeOk = $false
+    if ($logOutput) {
+      $loggingEnabled = ($logOutput -match '(?im)^\s*Log dropped packets\s*YES') -and ($logOutput -match '(?im)^\s*Log successful connections\s*YES')
+      $logSizeOk = ($logOutput -match '(?im)^\s*Max file size \(KB\)\s*32767')
+    }
+
+    if ($publicInboundBlock) { $checks += 'Firewall public inbound: Block' } else { $checks += 'Firewall public inbound: not Block'; $allPassed = $false }
+    if ($loggingEnabled -and $logSizeOk) { $checks += 'Firewall logging: enabled with max size 32767KB' } else { $checks += 'Firewall logging: not properly configured'; $allPassed = $false }
+  } catch {
+    $checks += 'Firewall defaults: check failed'
+    $allPassed = $false
+  }
+
+  # Check AMSI providers
+  try {
+    $providerRoot = 'HKLM:\SOFTWARE\Microsoft\AMSI\Providers'
+    $defaultProvider = '{2781761E-28E0-4109-99FE-B9D127C57AFE}'
+    $nonDefaultFound = $false
+    if (Test-Path $providerRoot) {
+      $providers = Get-ChildItem -Path $providerRoot -ErrorAction SilentlyContinue
+      foreach ($provider in $providers) {
+        if ($provider.PSChildName -ine $defaultProvider) {
+          $nonDefaultFound = $true
+          break
+        }
+      }
+    }
+
+    if ($nonDefaultFound) {
+      $checks += 'AMSI providers: non-default entries present'
+      $allPassed = $false
+    } else {
+      $checks += 'AMSI providers: only default entries present'
+    }
+  } catch {
+    $checks += 'AMSI providers: check failed'
+    $allPassed = $false
+  }
+
   $message = $checks -join '; '
   $status = if ($allPassed) { 'Succeeded' } else { 'Failed' }
 
@@ -291,6 +450,7 @@ function Invoke-Apply {
   try {
     Invoke-DownloadFirewallProfile
     Invoke-ImportFirewallProfile
+    Invoke-ConfigureFirewallDefaults
     $messages += 'Firewall configuration imported'
   } catch {
     Write-Err ("Firewall import failed: {0}" -f $_.Exception.Message)
@@ -310,6 +470,7 @@ function Invoke-Apply {
 
   # Harden Defender
   try {
+    Invoke-EnsureDefenderActive
     Invoke-HardenDefender
     $messages += 'Defender protections hardened'
   } catch {
@@ -325,6 +486,16 @@ function Invoke-Apply {
   } catch {
     Write-Err ("SmartScreen configuration failed: {0}" -f $_.Exception.Message)
     $messages += "SmartScreen configuration failed: $($_.Exception.Message)"
+    $hadError = $true
+  }
+
+  # Remove non-default AMSI providers
+  try {
+    Invoke-RemoveNonDefaultAmsiProviders
+    $messages += 'AMSI providers validated'
+  } catch {
+    Write-Err ("AMSI provider remediation failed: {0}" -f $_.Exception.Message)
+    $messages += "AMSI provider remediation failed: $($_.Exception.Message)"
     $hadError = $true
   }
 
