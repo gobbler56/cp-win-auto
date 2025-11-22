@@ -209,6 +209,9 @@ function Block-ChromeExtensions {
   Write-Info 'Setting empty ExtensionInstallAllowlist'
   $changed = (Set-ChromeListPolicy -PolicyName 'ExtensionInstallAllowlist' -Values @()) -or $changed
 
+  Write-Info 'Clearing extension force install list'
+  $changed = (Set-ChromeListPolicy -PolicyName 'ExtensionInstallForcelist' -Values @()) -or $changed
+
   Write-Info 'Blocking external extensions'
   $changed = (Ensure-RegistryValue -Path $script:ChromePolicyRoot -Name 'BlockExternalExtensions' -Type 'DWord' -Value 1) -or $changed
 
@@ -220,6 +223,27 @@ function Block-ChromeExtensions {
     }
   }
   $changed = (Set-ChromeJsonPolicy -PolicyName 'ExtensionSettings' -PolicyObject $extSettings) -or $changed
+
+  return $changed
+}
+
+function Clear-ChromeSiteExceptions {
+  $changed = $false
+
+  Write-Info 'Clearing site-specific permission allowlists'
+  $policyLists = @(
+    'CookiesAllowedForUrls',
+    'CookiesSessionOnlyForUrls',
+    'PopupsAllowedForUrls',
+    'NotificationsAllowedForUrls',
+    'GeolocationAllowedForUrls',
+    'VideoCaptureAllowedUrls',
+    'AudioCaptureAllowedUrls'
+  )
+
+  foreach ($policy in $policyLists) {
+    $changed = (Set-ChromeListPolicy -PolicyName $policy -Values @()) -or $changed
+  }
 
   return $changed
 }
@@ -296,6 +320,7 @@ function Invoke-Apply {
     if (Set-ChromePrivacySettings) { $changes += 'Applied privacy and security settings' }
     if (Disable-ChromeUnsafeFeatures) { $changes += 'Disabled unsafe features (DevTools, Incognito, Guest mode)' }
     if (Set-ChromePermissionDefaults) { $changes += 'Set restrictive site permission defaults' }
+    if (Clear-ChromeSiteExceptions) { $changes += 'Cleared site-specific exceptions' }
     if (Set-ChromeDownloadRestrictions) { $changes += 'Configured download restrictions' }
     if (Block-ChromeExtensions) { $changes += 'Blocked all extensions' }
     if (Set-ChromeDataClearing) { $changes += 'Configured data clearing policies' }
@@ -358,6 +383,10 @@ function Invoke-Verify {
   }
   $checks += "Extensions=$(if ($extBlocked) { 'Blocked' } else { 'Allowed' })"
 
+  $extForceListPath = Join-Path $script:ChromePolicyRoot 'ExtensionInstallForcelist'
+  $forceListPresent = (Test-Path -LiteralPath $extForceListPath) -and ((Get-Item $extForceListPath).Property.Count -gt 0)
+  $checks += "ExtensionForcelist=$(if (-not $forceListPresent) { 'Cleared' } else { 'Present' })"
+
   # Check download restrictions
   $dlRestrictions = Get-RegistryValueSafe -Path $script:ChromePolicyRoot -Name 'DownloadRestrictions'
   $dlRestricted = ($dlRestrictions -ge 2)
@@ -373,8 +402,27 @@ function Invoke-Verify {
   $clearConfigured = (Test-Path -LiteralPath $clearOnExitPath) -and ((Get-Item $clearOnExitPath).Property.Count -gt 0)
   $checks += "ClearOnExit=$(if ($clearConfigured) { 'Configured' } else { 'NotConfigured' })"
 
+  $exceptionPolicies = @(
+    'CookiesAllowedForUrls',
+    'CookiesSessionOnlyForUrls',
+    'PopupsAllowedForUrls',
+    'NotificationsAllowedForUrls',
+    'GeolocationAllowedForUrls',
+    'VideoCaptureAllowedUrls',
+    'AudioCaptureAllowedUrls'
+  )
+  $exceptionsCleared = $true
+  foreach ($policy in $exceptionPolicies) {
+    $policyPath = Join-Path $script:ChromePolicyRoot $policy
+    if ((Test-Path -LiteralPath $policyPath) -and ((Get-Item $policyPath).Property.Count -gt 0)) {
+      $exceptionsCleared = $false
+      break
+    }
+  }
+  $checks += "SiteExceptions=$(if ($exceptionsCleared) { 'Cleared' } else { 'Present' })"
+
   # Determine status based on checks
-  $status = if ($checks -match 'Weak|Allowed|Enabled|Unrestricted|NotConfigured' -and $checks -notmatch 'DoH=Enabled|SafeBrowsing=Enhanced') {
+  $status = if ($checks -match 'Weak|Allowed|Enabled|Unrestricted|NotConfigured|Present' -and $checks -notmatch 'DoH=Enabled|SafeBrowsing=Enhanced') {
     'NeedsAttention'
   } else {
     'Succeeded'
