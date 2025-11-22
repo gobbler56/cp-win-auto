@@ -68,6 +68,35 @@ function Write-ProvisionDebug {
 }
 
 # --------------------------------------------------------------------------------------
+# Clear-NonStandardGroupMemberships: remove users from any non-default groups
+# --------------------------------------------------------------------------------------
+function Clear-NonStandardGroupMemberships {
+  param([string[]]$AllowedGroups)
+
+  $allowed = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($g in @($AllowedGroups)) { if ($g) { [void]$allowed.Add($g) } }
+
+  $groups = @()
+  try { $groups = Get-LocalGroup -ErrorAction Stop } catch { return }
+
+  foreach ($grp in $groups) {
+    $grpName = $grp.Name
+    if (-not $grpName -or $allowed.Contains($grpName)) { continue }
+
+    $members = @()
+    try { $members = Get-LocalGroupMember -Group $grpName -ErrorAction Stop } catch { continue }
+
+    foreach ($member in $members) {
+      if ($member.ObjectClass -ne 'User') { continue }
+      $userName = ($member.Name -split '\\')[-1]
+      if (-not $userName) { continue }
+      Remove-UserFromLocalGroupSafe -Group $grpName -User $userName
+      Write-Ok ('Removed {0} from {1} during preflight cleanup' -f $userName, $grpName)
+    }
+  }
+}
+
+# --------------------------------------------------------------------------------------
 # Align-PrivilegedGroupMembership: keep privileged groups aligned to the allow-list
 # --------------------------------------------------------------------------------------
 function Align-PrivilegedGroupMembership {
@@ -214,6 +243,9 @@ function Invoke-Apply {
   $authUsersFromReadme  = @($Context.Readme.AuthorizedUsers)
   $authAdminsFromReadme = @($Context.Readme.AuthorizedAdmins)
 
+  # ---- Phase 0: preflight group cleanup ----
+  Clear-NonStandardGroupMemberships -AllowedGroups @('Administrators','Users')
+
   # ---- Build canonical hires/terminations ----
   $recentHires   = @()
   $terminatedSet = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
@@ -327,11 +359,21 @@ function Invoke-Apply {
         Set-LocalUserPassword -Name $u -Password (To-ComplexSecureString $u)
       }
       Enable-LocalUserSafe -Name $u
-      [void](Set-LocalPasswordExpires -Name $u -Expires:$true)
-      [void](Set-LocalUserCanChangePassword -Name $u -CanChange:$true)
       Write-Ok ('Hardened user {0}' -f $u)
     } catch {
       Write-Warn ('Failed to harden {0}: {1}' -f $u, $_.Exception.Message)
+    }
+  }
+
+  $allUsers = Get-LocalUserNames
+  foreach ($u in $allUsers) {
+    try {
+      [void](Set-LocalPasswordExpires -Name $u -Expires:$true)
+      [void](Set-LocalUserCanChangePassword -Name $u -CanChange:$true)
+      [void](Set-LocalUserMustChangePassword -Name $u -MustChange:$true)
+      Write-Ok ('Enforced password expiration for {0}' -f $u)
+    } catch {
+      Write-Warn ('Failed to enforce password expiration for {0}: {1}' -f $u, $_.Exception.Message)
     }
   }
 
