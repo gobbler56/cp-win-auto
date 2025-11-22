@@ -136,6 +136,24 @@ function Set-LocalUserCanChangePassword {
   }
   catch { return $false }
 }
+function Set-LocalUserMustChangePassword {
+  param([Parameter(Mandatory)][string]$Name,[bool]$MustChange)
+  $ok = $false
+  try {
+    $adsi = [ADSI]"WinNT://./$Name,user"
+    if ($adsi) {
+      $adsi.PasswordExpired = ($(if ($MustChange) { 1 } else { 0 }))
+      $adsi.SetInfo();
+      $ok = $true
+    }
+  } catch {}
+
+  if (-not $ok) {
+    try { return (Invoke-NetUserCommand -Arguments @($Name, "/logonpasswordchg:$(if($MustChange){'yes'}else{'no'})")) }
+    catch { return $false }
+  }
+  return $ok
+}
 function Test-LocalGroupMember {
   param([Parameter(Mandatory)][string]$Group,[Parameter(Mandatory)][string]$User)
   try { $members = Get-LocalGroupMember -Group $Group -ErrorAction Stop; return $members | Where-Object { $_.ObjectClass -eq 'User' -and $_.Name -match ("\\$([regex]::Escape($User))$") } | ForEach-Object { $true } | Select-Object -First 1 }
@@ -164,5 +182,5 @@ Export-ModuleMember -Function `
   Write-Info,Write-Ok,Write-Warn,Write-Err,Import-Json,Save-Json,ConvertFrom-HtmlEntities,Get-TextBetween, `
   Get-BuiltinAdministratorName,Get-DefaultLocalAccounts,Get-LocalUserNames,To-SecureString,New-RandomPassword, `
   Ensure-LocalUserExists,Set-LocalUserPassword,Enable-LocalUserSafe,Disable-LocalUserSafe,Remove-LocalUserSafe, `
-  Set-LocalPasswordExpires,Set-LocalUserCanChangePassword,Test-LocalGroupMember,Add-UserToLocalGroupSafe,Remove-UserFromLocalGroupSafe, `
+  Set-LocalPasswordExpires,Set-LocalUserCanChangePassword,Set-LocalUserMustChangePassword,Test-LocalGroupMember,Add-UserToLocalGroupSafe,Remove-UserFromLocalGroupSafe, `
   Get-AutoLogonUser
