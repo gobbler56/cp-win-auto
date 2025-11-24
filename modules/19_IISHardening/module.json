@@ -1,0 +1,11 @@
+{
+  "name": "IISHardening",
+  "category": "IISHardening",
+  "priority": 1900,
+  "appliesTo": {
+    "os": ["win11", "server2019", "server2022"],
+    "role": ["member", "dc"]
+  },
+  "dependsOn": [],
+  "parallelizable": true
+}
