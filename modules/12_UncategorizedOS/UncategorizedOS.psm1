@@ -322,11 +322,11 @@ function Test-MemoryMitigations {
 }
 
 function Ensure-EarlyLaunchPolicy {
-  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\EarlyLaunch' -Name 'DriverLoadPolicy' -Type 'DWord' -Value 1)
+  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\EarlyLaunch' -Name 'DriverLoadPolicy' -Type 'DWord' -Value 3)
 }
 
 function Test-EarlyLaunchPolicy {
-  return ((Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\EarlyLaunch' -Name 'DriverLoadPolicy') -eq 1)
+  return ((Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\EarlyLaunch' -Name 'DriverLoadPolicy') -eq 3)
 }
 
 function Ensure-ValidateHeapIntegrity {
@@ -345,6 +345,20 @@ function Ensure-HeapMitigationOptions {
   return (Ensure-RegistryValue -Path $kernelPath -Name 'MitigationOptions' -Type 'Binary' -Value $expected)
 }
 
+function Ensure-SehopEnabled {
+  $changed = $false
+  $kernelPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel'
+  $changed = (Ensure-RegistryValue -Path $kernelPath -Name 'DisableExceptionChainValidation' -Type 'DWord' -Value 0) -or $changed
+  $changed = (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' -Name 'EnableSEHOP' -Type 'DWord' -Value 1) -or $changed
+  return $changed
+}
+
+function Test-SehopEnabled {
+  $chainValidation = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' -Name 'DisableExceptionChainValidation'
+  $sehopt = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' -Name 'EnableSEHOP'
+  return ($chainValidation -eq 0 -and $sehopt -eq 1)
+}
+
 # ---- Settings: Networking ----------------------------------------------------
 
 function Ensure-IpSourceRoutingDisabled {
@@ -352,6 +366,15 @@ function Ensure-IpSourceRoutingDisabled {
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   $changed = (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name 'DisableIPSourceRouting' -Type 'DWord' -Value 2) -or $changed
   return $changed
+}
+
+function Ensure-RpcPacketPrivacy {
+  return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Rpc' -Name 'RpcAuthnLevelPrivacyEnabled' -Type 'DWord' -Value 1)
+}
+
+function Test-RpcPacketPrivacy {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Rpc' -Name 'RpcAuthnLevelPrivacyEnabled'
+  return ($value -eq 1)
 }
 
 # ---- System integrity / crash handling --------------------------------------
@@ -363,6 +386,97 @@ function Ensure-CoreDumpsDisabled {
 function Test-CoreDumpsDisabled {
   $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name 'CrashDumpEnabled'
   return ($value -eq 0)
+}
+
+function Ensure-CtrlScrollCrashDisabled {
+  $changed = $false
+  $kbdPaths = @(
+    'HKLM:\SYSTEM\CurrentControlSet\Services\kbdhid\Parameters',
+    'HKLM:\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters'
+  )
+
+  foreach ($path in $kbdPaths) {
+    $changed = (Ensure-RegistryValue -Path $path -Name 'CrashOnCtrlScroll' -Type 'DWord' -Value 0) -or $changed
+  }
+
+  return $changed
+}
+
+function Test-CtrlScrollCrashDisabled {
+  $kbdPaths = @(
+    'HKLM:\SYSTEM\CurrentControlSet\Services\kbdhid\Parameters',
+    'HKLM:\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters'
+  )
+
+  foreach ($path in $kbdPaths) {
+    $value = Get-RegistryValueSafe -Path $path -Name 'CrashOnCtrlScroll'
+    if ($value -ne 0) { return $false }
+  }
+
+  return $true
+}
+
+function Ensure-Tls10ClientDisabled {
+  $changed = $false
+  $tls10Client = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client'
+  $changed = (Ensure-RegistryValue -Path $tls10Client -Name 'Enabled' -Type 'DWord' -Value 0) -or $changed
+  $changed = (Ensure-RegistryValue -Path $tls10Client -Name 'DisabledByDefault' -Type 'DWord' -Value 1) -or $changed
+  return $changed
+}
+
+function Test-Tls10ClientDisabled {
+  $tls10Client = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client'
+  $enabled = Get-RegistryValueSafe -Path $tls10Client -Name 'Enabled'
+  $disabledByDefault = Get-RegistryValueSafe -Path $tls10Client -Name 'DisabledByDefault'
+  return ($enabled -eq 0 -and $disabledByDefault -eq 1)
+}
+
+function Ensure-MsiWebInstallPrompts {
+  return (Ensure-RegistryValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer' -Name 'SafeForScripting' -Type 'DWord' -Value 0)
+}
+
+function Test-MsiWebInstallPrompts {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer' -Name 'SafeForScripting'
+  return ($value -eq 0)
+}
+
+function Ensure-DefenderPpl {
+  return (Ensure-RegistryValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WinDefend' -Name 'LaunchProtected' -Type 'DWord' -Value 1)
+}
+
+function Test-DefenderPpl {
+  $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WinDefend' -Name 'LaunchProtected'
+  return ($value -eq 1)
+}
+
+function Remove-LegacyIEComponents {
+  $changed = $false
+  $features = @('Internet-Explorer-Optional-amd64', 'Internet-Explorer-Optional-x86')
+
+  foreach ($feature in $features) {
+    try {
+      $info = & dism.exe /online /Get-FeatureInfo /FeatureName:$feature 2>$null
+      if ($LASTEXITCODE -eq 0 -and $info -match 'State : Enabled') {
+        & dism.exe /online /Disable-Feature /FeatureName:$feature /Quiet /NoRestart 2>$null
+        if ($LASTEXITCODE -eq 0) { $changed = $true }
+      }
+    } catch {
+      Write-Warn ("Failed to query or disable feature {0}: {1}" -f $feature, $_.Exception.Message)
+    }
+  }
+
+  $edgePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+  $changed = (Ensure-RegistryValue -Path $edgePolicy -Name 'InternetExplorerIntegrationLevel' -Type 'DWord' -Value 0) -or $changed
+  $changed = (Ensure-RegistryValue -Path $edgePolicy -Name 'InternetExplorerIntegrationReloadInIEModeAllowed' -Type 'DWord' -Value 0) -or $changed
+
+  return $changed
+}
+
+function Test-LegacyIERemoved {
+  $edgePolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+  $level = Get-RegistryValueSafe -Path $edgePolicy -Name 'InternetExplorerIntegrationLevel'
+  $reload = Get-RegistryValueSafe -Path $edgePolicy -Name 'InternetExplorerIntegrationReloadInIEModeAllowed'
+  return ($level -eq 0 -and $reload -eq 0)
 }
 
 function Ensure-FipsAlgorithmsEnabled {
@@ -870,11 +984,15 @@ function Apply-AllSettings {
   if (Ensure-AutorunDisabled)       { $changes += 'Disabled AutoRun' }
   if (Ensure-AutoplayDisabled)      { $changes += 'Disabled AutoPlay' }
   if (Ensure-CoreDumpsDisabled)     { $changes += 'Disabled crash dumps' }
+  if (Ensure-CtrlScrollCrashDisabled){ $changes += 'Disabled Ctrl+Scroll crash shortcut' }
   if (Ensure-MemoryMitigations)     { $changes += 'Enabled ASLR mitigations' }
   if (Ensure-EarlyLaunchPolicy)     { $changes += 'Restricted ELAM driver loading' }
   if (Ensure-ValidateHeapIntegrity) { $changes += 'Enabled heap integrity validation' }
   if (Ensure-HeapMitigationOptions) { $changes += 'Updated mitigation options' }
+  if (Ensure-SehopEnabled)          { $changes += 'Enabled SEHOP' }
   if (Ensure-IpSourceRoutingDisabled){ $changes += 'Disabled IP source routing' }
+  if (Ensure-Tls10ClientDisabled)   { $changes += 'Disabled client-side TLS 1.0' }
+  if (Ensure-RpcPacketPrivacy)      { $changes += 'Enabled RPC packet privacy' }
   if (Ensure-VbsMandatoryMode)      { $changes += 'Enabled VBS mandatory mode' }
   if (Ensure-MachineIdentityIsolation) { $changes += 'Enforced Machine Identity Isolation' }
   if (Ensure-DirectoryRestrictions) { $changes += 'Hardened directory ACLs' }
@@ -883,6 +1001,9 @@ function Apply-AllSettings {
   if (Ensure-PrinterDriverRestriction) { $changes += 'Limited printer driver installs to admins' }
   if (Ensure-LockScreenNotificationsDisabled) { $changes += 'Disabled lock screen notifications' }
   if (Ensure-WindowsStoreDisabled)  { $changes += 'Disabled Windows Store access' }
+  if (Ensure-MsiWebInstallPrompts)  { $changes += 'Restored MSI web install prompts' }
+  if (Remove-LegacyIEComponents)    { $changes += 'Removed legacy Internet Explorer/IE mode' }
+  if (Ensure-DefenderPpl)           { $changes += 'Enabled Defender PPL' }
   if (Ensure-FipsAlgorithmsEnabled) { $changes += 'Enforced FIPS algorithms' }
   if (Ensure-SecureBootEnabled)     { $changes += 'Checked Secure Boot requirement' }
 
@@ -924,10 +1045,14 @@ function Invoke-Verify {
   $checks += "AutoRun=$(if ((Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' -Name 'NoDriveTypeAutoRun') -eq 255) { 'Disabled' } else { 'NeedsAttention' })"
   $checks += "AutoPlay=$(if (Test-AutoplayDisabled) { 'Disabled' } else { 'NeedsAttention' })"
   $checks += "ASLR=$(if (Test-MemoryMitigations) { 'Enabled' } else { 'NeedsAttention' })"
+  $checks += "SEHOP=$(if (Test-SehopEnabled) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "ELAM=$(if (Test-EarlyLaunchPolicy) { 'Strict' } else { 'NeedsAttention' })"
   $checks += "HeapIntegrity=$(if (Test-ValidateHeapIntegrity) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "IPSourceRouting=$(if ((Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'DisableIPSourceRouting') -eq 2) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "Tls10Client=$(if (Test-Tls10ClientDisabled) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "RpcPrivacy=$(if (Test-RpcPacketPrivacy) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "CrashDumps=$(if (Test-CoreDumpsDisabled) { 'Disabled' } else { 'NeedsAttention' })"
+  $checks += "CtrlScroll=$(if (Test-CtrlScrollCrashDisabled) { 'Disabled' } else { 'NeedsAttention' })"
   $checks += "VBSMandatory=$(if (Test-VbsMandatoryMode) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "MachineIdentityIsolation=$(if (Test-MachineIdentityIsolation) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "Shares=$(if (Test-UnauthorizedShares) { 'Clean' } else { 'NeedsReview' })"
@@ -935,6 +1060,9 @@ function Invoke-Verify {
   $checks += "PrinterDrivers=$(if (Test-PrinterDriverRestriction) { 'AdminOnly' } else { 'NeedsAttention' })"
   $checks += "LockScreenNotifications=$(if (Test-LockScreenNotificationsDisabled) { 'Hidden' } else { 'NeedsAttention' })"
   $checks += "WindowsStore=$(if (Test-WindowsStoreDisabled) { 'Prohibited' } else { 'NeedsAttention' })"
+  $checks += "MsiWebPrompts=$(if (Test-MsiWebInstallPrompts) { 'Prompting' } else { 'NeedsAttention' })"
+  $checks += "LegacyIE=$(if (Test-LegacyIERemoved) { 'Removed' } else { 'NeedsAttention' })"
+  $checks += "DefenderPPL=$(if (Test-DefenderPpl) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "SecureBoot=$(if (Test-SecureBootEnabled) { 'Enabled' } else { 'NeedsAttention' })"
   $checks += "FIPS=$(if (Test-FipsAlgorithmsEnabled) { 'Enabled' } else { 'NeedsAttention' })"
 

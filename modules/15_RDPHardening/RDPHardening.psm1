@@ -243,6 +243,7 @@ function Set-LsaAuthHardening {
   # Optional but strong: LSA Protection (RunAsPPL)
   Write-Info 'Enabling LSA Protection (RunAsPPL - optional but recommended)'
   $changed = (Ensure-RegistryValue -Path $lsaPath -Name 'RunAsPPL' -Type 'DWord' -Value 1) -or $changed
+  $changed = (Ensure-RegistryValue -Path $lsaPath -Name 'RunAsPPLBoot' -Type 'DWord' -Value 1) -or $changed
 
   return $changed
 }
@@ -395,6 +396,18 @@ function Invoke-Apply {
     if (Set-RdpPort -Port $script:CustomRdpPort) { $changes += "Changed RDP port to $script:CustomRdpPort" }
     if (Update-RdpFirewallRules -Port $script:CustomRdpPort) { $changes += "Updated firewall rules for port $script:CustomRdpPort" }
 
+    if ($changes.Count -gt 0) {
+      try {
+        Write-Info 'Refreshing Group Policy to apply RDP hardening changes'
+        $gpProc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'echo N|gpupdate.exe /force' -Wait -PassThru -NoNewWindow
+        if ($gpProc.ExitCode -ne 0) {
+          Write-Warn ("gpupdate.exe returned exit code {0}" -f $gpProc.ExitCode)
+        }
+      } catch {
+        Write-Warn ("gpupdate.exe failed: {0}" -f $_.Exception.Message)
+      }
+    }
+
     $message = if ($changes.Count -gt 0) {
       'RDP hardening applied: ' + ($changes -join '; ')
     } else {
@@ -453,7 +466,10 @@ function Invoke-Verify {
   $checks += "CredSSP=$(if ($credsspHardened) { 'Hardened' } else { 'Weak' })"
 
   # Check LSA hardening
-  $lsaHardened = (Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LmCompatibilityLevel') -eq 5
+  $lmCompat = (Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LmCompatibilityLevel') -eq 5
+  $runAsPpl = (Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'RunAsPPL') -eq 1
+  $runAsPplBoot = (Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'RunAsPPLBoot') -eq 1
+  $lsaHardened = ($lmCompat -and $runAsPpl -and $runAsPplBoot)
   $checks += "LSA=$(if ($lsaHardened) { 'Hardened' } else { 'Weak' })"
 
   # Check RDP port
